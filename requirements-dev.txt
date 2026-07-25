@@ -1,0 +1,14 @@
+# What CI installs, and all you need to run the test suite.
+#
+#   pip install -r requirements-dev.txt && python -m unittest discover -s intelligence_os/tests -t .
+#
+# Deliberately NOT the full runtime set: the suite is offline and stubs the
+# heavy optional deps (see intelligence_os/tests/_stubs.py), so CI does not pay
+# for a torch download to check the memory graph. Verified: 110/110 pass with
+# exactly these three installed and nothing else.
+numpy<2
+opencv-python-headless==4.10.*
+PyYAML>=6.0
+
+# Linting. Config lives in pyproject.toml under [tool.ruff].
+ruff>=0.6

@@ -12,8 +12,13 @@ from typing import Optional
 
 import cv2
 from intelligence_os.store import Store
-from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG
+from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG, ROOT
 from intelligence_os.run import run as run_pipeline
+
+# Anchored to the package, not the working directory: an installed console
+# script starts wherever the user happens to be, and a UI that 404s unless you
+# cd to the repo root isn't installable.
+STATIC_DIR = str(ROOT / 'static')
 
 # M6: per-camera frame buffers (keyed by camera name)
 latest_frames: dict[str, bytes] = {}   # cam_name -> JPEG bytes
@@ -161,7 +166,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path_clean = self.path.split('?', 1)[0]
-        
+
         # 1. Determine if resource is publicly accessible
         is_public = (
             path_clean in ('/static/login.html', '/static/style.css',
@@ -171,13 +176,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                            '/api/auth/status') or
             path_clean.startswith('/static/vendor/')
         )
-        
+
         # 2. Onboarding/first-run check
         first_run = self.is_first_run()
-        
+
         # 3. User session check
         user_id = self.check_auth()
-        
+
         # 4. Redirect or block unauthenticated clients
         if not user_id and not is_public:
             if self.path.startswith('/api/'):
@@ -185,7 +190,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self.redirect_to_login()
             return
-            
+
         self.current_user_id = user_id      # M6: settings marks which row is you
 
         # 5. Prevent logged-in users from seeing login screen
@@ -196,7 +201,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         # 6. Route requests
         if self.path == '/':
             # the whole app, graph pane included (FR-NG-6: no separate graph URL)
-            self.serve_static('intelligence_os/static/home.html', 'text/html')
+            self.serve_static(os.path.join(STATIC_DIR, 'home.html'), 'text/html')
         elif self.path == '/api/auth/status':
             username = None
             delivery_schedule = "off"
@@ -226,7 +231,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             from intelligence_os.rules import load_rules
             self.send_json({"rules": load_rules()})
         elif self.path.startswith('/static/'):
-            static_root = os.path.realpath('intelligence_os/static')
+            static_root = os.path.realpath(STATIC_DIR)
             rel = self.path[len('/static/'):].split('?', 1)[0]
             candidate = os.path.realpath(os.path.join(static_root, rel))
             # containment check: reject any path that escapes static_root (../, symlinks)
@@ -286,7 +291,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         first_run = self.is_first_run()
         user_id = self.check_auth()
         path_clean = self.path.split('?', 1)[0]
-        
+
         # Public post routes
         if path_clean == '/api/auth/register':
             if not first_run:
@@ -300,12 +305,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self.serve_login()
             return
-            
+
         # Protected post routes
         if not user_id:
             self.send_error_json(401, "Unauthorized")
             return
-            
+
         # Attach current authenticated user id to handler instance for attribution
         self.current_user_id = user_id
 
@@ -1649,10 +1654,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             total_persons = c.execute("SELECT COUNT(*) FROM entities WHERE type='person' AND status='active'").fetchone()[0]
             total_objects = c.execute("SELECT COUNT(*) FROM entities WHERE type='object' AND status='active'").fetchone()[0]
             total_obs = c.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
-            
+
             cutoff = time.time() - (24 * 3600)
             rows = c.execute("""
-                SELECT 
+                SELECT
                     CAST(timestamp / 3600 AS INT) * 3600 as hour,
                     COUNT(*) as count
                 FROM observations
@@ -1660,7 +1665,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 GROUP BY hour
                 ORDER BY hour ASC
             """, (cutoff,)).fetchall()
-            
+
             timeline = [{"hour": r["hour"], "count": r["count"]} for r in rows]
 
             # M6: per-camera observation counts
@@ -1753,8 +1758,13 @@ def start_pipeline(args):
     except Exception as e:
         print(f"Pipeline crashed: {e}")
 
-if __name__ == "__main__":
-    p = argparse.ArgumentParser(prog="intelligence_os.web")
+def main(argv=None):
+    """Console entry point (`intelligence-os`) and `python -m intelligence_os.web`.
+
+    A function rather than a bare `__main__` block so packaging can point at it;
+    nothing here is CWD-relative, so it runs from any directory.
+    """
+    p = argparse.ArgumentParser(prog="intelligence-os")
     # not required: falls back to config.yaml, then webcam 0 (§10 no-config boot)
     g = p.add_mutually_exclusive_group(required=False)
     g.add_argument("--webcam", type=int)
@@ -1768,17 +1778,21 @@ if __name__ == "__main__":
     p.add_argument("--no-show", dest="show", action="store_false")
     p.add_argument("--port", type=int, default=8000)
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
     from intelligence_os.run import resolve_source
     resolve_source(args)                       # CLI > config.yaml > webcam 0
     if args.sensitivity is None:
         args.sensitivity = "balanced"          # web default: responsive live demo
     if args.show is None:
         args.show = False
-        
+
     t = threading.Thread(target=start_pipeline, args=(args,), daemon=True)
     t.start()
-    
+
     server = ThreadedHTTPServer(('127.0.0.1', args.port), RequestHandler)
     print(f"Starting Intelligence OS Web Server at http://localhost:{args.port} ...")
     server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

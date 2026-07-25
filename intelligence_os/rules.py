@@ -20,10 +20,9 @@ The LLM is never in the frame loop. Compilation is the only place it touches a r
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import cv2

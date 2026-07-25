@@ -1,0 +1,93 @@
+[build-system]
+# >=77 for PEP 639 (`license = "Apache-2.0"` as an SPDX expression, and
+# license-files). Older setuptools wants a License:: classifier instead, and
+# the two forms are mutually exclusive.
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intelligence-os"
+version = "0.1.0"
+description = "Turn camera streams into a correctable, evidence-backed memory graph you can ask questions of."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Infinex Labs" }]
+keywords = [
+    "computer-vision", "video-understanding", "memory-graph", "surveillance",
+    "vlm", "re-identification", "sqlite", "self-hosted",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+# Kept in sync with requirements.txt by hand — that file is the one with the
+# reasoning comments, this one is what pip resolves.
+dependencies = [
+    "numpy<2",
+    "opencv-python-headless==4.10.*",
+    "PyYAML>=6.0",
+    "psutil>=5.9",
+    "ultralytics>=8.3",
+    "lap>=0.5",
+]
+
+[project.optional-dependencies]
+# Each extra unlocks exactly one stage of the cascade; none of them are needed
+# to boot, and the app degrades to the next-cheapest stage without them.
+identity = ["insightface>=0.7", "onnxruntime>=1.17"]   # stage C — face re-id
+vlm = ["anthropic>=0.40"]                               # stage F — descriptions
+dev = ["ruff>=0.6"]
+all = ["insightface>=0.7", "onnxruntime>=1.17", "anthropic>=0.40"]
+
+[project.urls]
+Homepage = "https://github.com/Infinex-Labs/Intelligence-OS"
+Documentation = "https://github.com/Infinex-Labs/Intelligence-OS/tree/main/docs"
+Source = "https://github.com/Infinex-Labs/Intelligence-OS"
+Issues = "https://github.com/Infinex-Labs/Intelligence-OS/issues"
+Changelog = "https://github.com/Infinex-Labs/Intelligence-OS/blob/main/CHANGELOG.md"
+
+[project.scripts]
+intelligence-os = "intelligence_os.web:main"
+
+[tool.setuptools.packages.find]
+include = ["intelligence_os*"]
+exclude = ["intelligence_os.tests*"]
+
+[tool.setuptools.package-data]
+# The UI is served from the package directory, so it has to ship inside the
+# wheel — otherwise an installed copy 404s on its own dashboard.
+intelligence_os = ["static/*.html", "static/*.css", "static/*.png", "static/dist/**", "static/vendor/**"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [".venv", "intelligence_os/static", "build", "dist"]
+
+[tool.ruff.lint]
+# Deliberately a floor, not a style bible. A lint gate that is red the day it
+# lands teaches everyone to ignore it, so this is the set the codebase passes
+# today: real defects (undefined names, unused imports, syntax errors) and
+# whitespace. Tightening steps, in order, when someone wants to do the cleanup:
+#   "B"   — 4 x B023 (closures over loop variables in run.py:184) and 1 x B905
+#   "UP"  — 104 x UP045 (Optional[X] -> X | None); mechanical, huge diff
+#   "E7"  — 36 x E702 (semicolons), 8 x E731 (lambda assignment)
+select = ["E9", "F", "W"]
+ignore = [
+    "E501",   # long lines — the tables and SQL in store.py read better long
+    "F841",   # assigned-but-unused: mostly named-for-readability test locals,
+              # plus deliver.py's `success`, which documents that the delivery
+              # timestamp is bumped whether or not the send worked.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"intelligence_os/tests/*" = ["F401"]   # _stubs is imported for its side effect
+"intelligence_os/__init__.py" = ["F401"]

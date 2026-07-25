@@ -1,0 +1,22 @@
+# Code owners are requested for review automatically on any PR touching their
+# paths. Ownership here follows blast radius, not seniority.
+
+# Default owner for everything not matched below.
+*                           @Infinex-Labs/maintainers
+
+# The schema is the contract every other layer rests on, and migrations must be
+# additive — these need an owner's eyes even for a one-line change.
+/intelligence_os/store.py   @Infinex-Labs/maintainers
+
+# Identity is the guarantee the whole memory graph depends on: a threshold
+# change here silently fuses or fragments people.
+/intelligence_os/identity.py @Infinex-Labs/maintainers
+
+# Auth, session handling and the request surface.
+/intelligence_os/auth.py    @Infinex-Labs/maintainers
+/intelligence_os/web.py     @Infinex-Labs/maintainers
+
+# Anything that changes what CI enforces, or what the project promises.
+/.github/                   @Infinex-Labs/maintainers
+/LICENSE                    @Infinex-Labs/maintainers
+/SECURITY.md                @Infinex-Labs/maintainers

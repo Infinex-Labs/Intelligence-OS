@@ -322,7 +322,6 @@ def _camera_loop(cam_name: str, source, shared: _SharedModels,
 def run(args, on_frame=None, state=None) -> None:
     """M6: orchestrate one thread per camera. Shared models load once.
     For single-camera configs this is exactly one thread (no behavior change)."""
-    import cv2
 
     if args.sensitivity:
         CONFIG.trigger.sensitivity = args.sensitivity

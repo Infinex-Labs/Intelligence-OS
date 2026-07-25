@@ -1,0 +1,114 @@
+name: Bug report
+description: Something behaves differently from what the docs or the code says it should
+title: "[bug] "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing this. Two quick asks before you start:
+
+        - **Security issue?** Don't file it here — see [SECURITY.md](https://github.com/Infinex-Labs/Intelligence-OS/blob/main/SECURITY.md).
+        - **Redact your camera URLs.** RTSP strings usually embed a username and
+          password. Replace them with `rtsp://user:pass@host/stream`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        Two different people are being merged into one entity after about an hour of footage.
+        I expected them to stay separate — they don't look alike.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >
+        The exact command, and the source. A clip that reproduces it is the single
+        most useful thing you can attach — `--video clip.mp4` replays through the
+        identical pipeline, so it makes the bug reproducible for us too.
+      value: |
+        1. `python -m intelligence_os.web --video clip.mp4`
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Which stage does it look like?
+      description: Best guess is fine — "not sure" is a perfectly good answer.
+      options:
+        - Not sure
+        - A — motion gate (capture.py)
+        - B — detection / tracking (detect.py)
+        - C — identity / face re-id (identity.py)
+        - D — zones and scene state (scene_state.py)
+        - E/F — VLM trigger or description (vlm.py)
+        - G — memory write (observe.py, store.py)
+        - H — distillation (distill.py)
+        - I — ask / operator (ask.py, operator.py)
+        - Rules and alerting (rules.py, deliver.py)
+        - Web UI / dashboard (web.py, static/)
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output or traceback
+      description: Paste the traceback in full if there is one. It is rendered as a code block — no backticks needed.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`python -c \"import intelligence_os; print(intelligence_os.__version__)\"`, plus the commit if you're on a checkout."
+      placeholder: "0.1.0 (a1b2c3d)"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Python
+      placeholder: "macOS 15.2, Python 3.11.9"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Camera source
+      options:
+        - Video file (--video)
+        - Webcam (--webcam)
+        - RTSP / IP camera
+        - Multiple cameras
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: optional-deps
+    attributes:
+      label: Which optional stages are enabled?
+      description: These change the code path substantially, so it matters.
+      options:
+        - label: "Face identity (`face_matching: true` / insightface installed)"
+        - label: "VLM descriptions (`ANTHROPIC_API_KEY` set)"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't a duplicate
+          required: true
+        - label: I removed any credentials from the logs and config I pasted
+          required: true

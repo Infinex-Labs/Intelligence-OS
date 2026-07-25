@@ -1,0 +1,71 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install ruff
+        run: pip install "ruff>=0.6"
+
+      # Rule set is in pyproject.toml under [tool.ruff]. It is deliberately a
+      # floor — real defects and whitespace — and it is green on main. If you
+      # are here because a mechanical rewrite (UP045 and friends) is failing,
+      # that tightening is its own PR, not part of your feature.
+      - name: ruff check
+        run: ruff check . --output-format=github
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Catches the two ways this repo's packaging has broken before: metadata
+      # that no longer builds, and a wheel that ships without the static UI it
+      # serves.
+      - name: Build the distribution
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+
+      - name: The wheel must contain the dashboard
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              "intelligence_os/static/home.html",
+              "intelligence_os/static/login.html",
+              "intelligence_os/static/style.css",
+          ]
+          missing = [r for r in required if r not in names]
+          if missing:
+              sys.exit(f"wheel {wheel} is missing the UI it serves: {missing}")
+          print(f"{wheel}: dashboard present ({len(names)} files)")
+          PY
