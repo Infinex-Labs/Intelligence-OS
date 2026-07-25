@@ -1,0 +1,2327 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intelligence OS</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="apple-touch-icon" href="/static/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- vis is a global; the shell's module reads it (FR-NG: the graph renders in-pane) -->
+<script src="/static/vendor/vis-network.min.js"></script>
+
+<style>
+:root{
+  --paper:#EFEEE9;--card:#FBFAF7;--card-2:#FFFFFF;--ink:#151815;--ink-2:#585C57;--ink-3:#8B8F88;
+  --rule:#DFDDD5;--rule-2:#C6C4BB;--video:#12151A;--video-2:#242932;--video-3:#3A414C;
+  --fired:#B02F26;--fired-bg:#FAEBE9;--fired-line:#E6C6C1;
+  --unusual:#25548F;--unusual-bg:#EBF1F8;--unusual-line:#C3D3E8;
+  --stale:#8F5A08;--stale-bg:#FAF0DE;--stale-line:#E7D2A6;
+  --ok:#3B6636;--ok-bg:#EDF3EC;--shadow:0 1px 3px rgba(0,0,0,.04),0 8px 30px rgba(0,0,0,.05);
+}
+[data-theme=dark]{
+  --paper:#14161A;--card:#1B1E24;--card-2:#20242B;--ink:#E8E9E6;--ink-2:#A4A8A2;--ink-3:#71756F;
+  --rule:#2C3037;--rule-2:#3C424B;--video:#0C0E12;--video-2:#1A1E25;--video-3:#2A2F38;
+  --fired:#E27168;--fired-bg:#2A1917;--fired-line:#4A2723;
+  --unusual:#6FA0DC;--unusual-bg:#161E2A;--unusual-line:#2A3D57;
+  --stale:#D6A24E;--stale-bg:#241C0E;--stale-line:#463714;
+  --ok:#7FB578;--ok-bg:#162114;--shadow:0 1px 3px rgba(0,0,0,.3),0 8px 30px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font:400 14px/1.55 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:0;transition:background .2s,color .2s}
+.mono{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:-.01em}
+h1,h2,h3,.disp{font-family:'Space Grotesk',sans-serif;font-weight:500;letter-spacing:-.02em}
+kbd{font-family:'IBM Plex Mono';font-size:10px;background:var(--paper);border:1px solid var(--rule-2);border-radius:4px;padding:1px 5px;color:var(--ink-3)}
+a{color:inherit}
+
+.app{max-width:none;margin:0;background:var(--card);border:0;border-radius:0;overflow:hidden;display:grid;grid-template-columns:224px 1fr;min-height:100vh;position:relative}
+
+/* ---------- rail ---------- */
+.rail{background:var(--paper);border-right:1px solid var(--rule);padding:18px 12px;display:flex;flex-direction:column}
+.brand{display:flex;align-items:center;gap:10px;padding:0 8px 4px}
+/* both marks are flat-backed squares, so they keep the rounding the old inline glyph had.
+   Swapped by attribute rather than JS — setTheme() only touches data-theme. */
+.brand .glyph{width:26px;height:26px;flex-shrink:0;display:block;border-radius:7px;
+  background:url(/static/logo-light.png) center/contain no-repeat}
+[data-theme=dark] .brand .glyph{background-image:url(/static/logo.png)}
+.brand b{font-family:'Space Grotesk';font-weight:700;font-size:14.5px;letter-spacing:-.03em;line-height:1.1;display:block}
+.brand .sub{font-size:10px;color:var(--ink-3);font-weight:400}
+.kbtn{all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;margin:16px 0 4px;padding:7px 10px;border:1px solid var(--rule);border-radius:8px;background:var(--card-2);color:var(--ink-3);font-size:12.5px}
+.kbtn:hover{border-color:var(--rule-2)}
+.kbtn .sp{flex:1}
+.nav{display:flex;flex-direction:column;gap:1px;margin-top:8px;overflow-y:auto}
+.nav button{all:unset;cursor:pointer;display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;font-size:13px;color:var(--ink-2)}
+.nav button .ico{width:15px;text-align:center;color:var(--ink-3);font-size:13px}
+.nav button:hover{background:var(--rule)}
+.nav button:focus-visible{outline:2px solid var(--unusual);outline-offset:1px}
+.nav button[aria-current=true]{background:var(--card-2);color:var(--ink);font-weight:500;box-shadow:0 0 0 1px var(--rule)}
+.nav button[aria-current=true] .ico{color:var(--ink)}
+.badge{margin-left:auto;font-family:'IBM Plex Mono';font-size:10px;background:var(--fired);color:#fff;border-radius:20px;padding:1px 6px}
+.railfoot{margin-top:auto;padding-top:12px;border-top:1px solid var(--rule)}
+.sysh{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);padding:2px 8px 6px;font-weight:600}
+.stat-line{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;color:var(--ink-2);font-size:12px}
+.stat-line .v{font-family:'IBM Plex Mono';font-size:11px;color:var(--ink)}
+.stat-line .g{display:inline-flex;align-items:center;gap:6px}
+.led{width:6px;height:6px;border-radius:50%;background:var(--ok);flex-shrink:0}
+@media(prefers-reduced-motion:no-preference){.led{animation:p 2.4s ease-in-out infinite}}
+@keyframes p{50%{opacity:.3}}
+.meter{height:5px;border-radius:4px;background:var(--rule-2);overflow:hidden;margin:2px 8px 4px}
+.meter i{display:block;height:100%;background:var(--unusual)}
+.meter i.warn{background:var(--stale)}
+.themebtn{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:6px 8px;margin-top:8px;border-radius:7px;font-size:12px;color:var(--ink-3)}
+.themebtn:hover{background:var(--rule)}
+
+/* ---------- main ---------- */
+.main{display:flex;flex-direction:column;min-width:0}
+.topbar{display:flex;align-items:center;gap:16px;padding:13px 22px;border-bottom:1px solid var(--rule);background:var(--card)}
+.search{flex:1;max-width:440px;display:flex;align-items:center;gap:9px;background:var(--card-2);border:1px solid var(--rule);border-radius:9px;padding:8px 11px;color:var(--ink-3);cursor:text}
+.search:hover{border-color:var(--rule-2)}
+.search input{all:unset;flex:1;font-size:13px;color:var(--ink)}
+.search input::placeholder{color:var(--ink-3)}
+.topright{display:flex;align-items:center;gap:14px;margin-left:auto}
+.assist-btn{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--unusual);border:1px solid var(--unusual-line);background:var(--unusual-bg);padding:7px 13px;border-radius:8px}
+.assist-btn:hover{border-color:var(--unusual)}
+.bell{all:unset;cursor:pointer;position:relative;color:var(--ink-2);font-size:16px;padding:4px}
+.bell:hover{color:var(--ink)}
+.bell .cnt{position:absolute;top:-2px;right:-4px;font-family:'IBM Plex Mono';font-size:9px;background:var(--fired);color:#fff;border-radius:20px;padding:0 4px;line-height:14px;border:1.5px solid var(--card)}
+.who{display:flex;align-items:center;gap:9px;cursor:pointer;padding:2px 4px;border-radius:8px}
+.who:hover{background:var(--paper)}
+.ava{width:28px;height:28px;border-radius:50%;background:var(--unusual);color:#fff;font-size:10px;font-weight:600;font-family:'Space Grotesk';display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.who p{font-size:12.5px;font-weight:500;line-height:1.2}.who span{font-size:10.5px;color:var(--ink-3)}
+
+.canvas{padding:20px 22px 26px}
+
+/* section head */
+.sect{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+.sect h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;font-weight:600}
+.sect .n{color:var(--ink-3)}
+.sect .r{margin-left:auto;display:flex;align-items:center;gap:12px}
+.sect .r a{font-size:12px;color:var(--unusual);text-decoration:none;cursor:pointer}
+.sect .r a:hover{text-decoration:underline}
+.online{display:inline-flex;align-items:center;gap:5px;color:var(--ok);font-family:'IBM Plex Mono';font-size:11px}
+.online i{width:5px;height:5px;border-radius:50%;background:var(--ok)}
+
+/* card */
+.card{border:1px solid var(--rule);border-radius:11px;background:var(--card-2);overflow:hidden}
+.card>.h{display:flex;align-items:center;gap:10px;padding:13px 15px;border-bottom:1px solid var(--rule)}
+.card>.h h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);font-weight:600}
+.card>.h .r{margin-left:auto;display:flex;align-items:center;gap:12px}
+.card>.h .r a{font-size:12px;color:var(--unusual);text-decoration:none;cursor:pointer}
+.card>.h .r a:hover{text-decoration:underline}
+
+/* ---------- cameras ---------- */
+.cams{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:26px}
+.cam{border:1px solid var(--rule);border-radius:10px;overflow:hidden;background:var(--video);transition:border-color .15s}
+.cam:hover{border-color:var(--rule-2)}
+.cam svg{display:block;width:100%;height:auto;cursor:pointer}
+.cam .feed{position:relative;line-height:0}
+/* feeds arrive at whatever resolution the camera sends; pin the tile so a
+   wall of mixed sources stays a grid and not a staircase */
+.cam .feed>img,.cam .feed>svg{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:var(--video)}
+.cam .scrim{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(12,14,18,.58);opacity:0;transition:opacity .15s;pointer-events:none}
+.cam[data-proc=off] .scrim{opacity:1}
+.pausedtag{font-family:'IBM Plex Mono';font-size:11px;letter-spacing:-.01em;color:#EFEEE9;border:1px solid rgba(239,238,233,.35);border-radius:20px;padding:4px 12px;display:inline-flex;align-items:center;gap:7px;background:rgba(12,14,18,.5)}
+.cam .bar{display:flex;align-items:center;gap:8px;padding:8px 11px;background:var(--card-2);border-top:1px solid var(--rule)}
+.cam .bar .nm{font-family:'IBM Plex Mono';font-size:11px;color:var(--ink)}
+.cam .bar .ts{font-family:'IBM Plex Mono';font-size:10px;color:var(--ink-3)}
+.barctl{margin-left:auto;display:flex;align-items:center;gap:8px}
+.proc{all:unset;cursor:pointer;font-size:10px;line-height:1;color:var(--ink-3);border:1px solid var(--rule);border-radius:6px;padding:4px 6px;background:var(--card-2)}
+.proc:hover{border-color:var(--rule-2);color:var(--ink)}
+.proc:focus-visible{outline:2px solid var(--unusual);outline-offset:1px}
+.cam[data-proc=off] .proc{color:var(--stale);border-color:var(--stale-line);background:var(--stale-bg)}
+.cam[data-proc=off] .live{color:var(--stale)}
+.cam[data-proc=off] .live i{background:var(--stale);animation:none}
+.live{display:inline-flex;align-items:center;gap:5px;color:var(--fired);font-family:'IBM Plex Mono';font-size:10px}
+.live i{width:5px;height:5px;border-radius:50%;background:var(--fired);display:inline-block}
+@media(prefers-reduced-motion:no-preference){.live i{animation:p 1.6s ease-in-out infinite}}
+.viewseg{display:flex;gap:1px;border:1px solid var(--rule);border-radius:7px;overflow:hidden}
+.viewseg button{all:unset;cursor:pointer;font-size:12px;color:var(--ink-2);padding:5px 9px}
+.viewseg button:hover{background:var(--paper)}
+.viewseg button[aria-pressed=true]{background:var(--ink);color:var(--card)}
+
+/* ---------- grid rows ---------- */
+.row-3{display:grid;grid-template-columns:1fr 1fr 320px;gap:16px;margin-bottom:26px;align-items:start}
+.row-3b{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;align-items:start}
+
+/* alerts */
+.alert{display:flex;gap:11px;padding:11px 15px;border-bottom:1px solid var(--rule);cursor:pointer}
+.alert:last-child{border-bottom:0}
+.alert:hover{background:var(--paper)}
+.alert .ic{width:30px;height:30px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px}
+.alert .ic.high{background:var(--fired-bg);color:var(--fired)}
+.alert .ic.med{background:var(--stale-bg);color:var(--stale)}
+.alert .ic.low{background:var(--unusual-bg);color:var(--unusual)}
+.alert .t{flex:1;min-width:0}
+.alert .t p{font-size:13px;font-weight:500}
+.alert .t .m{font-size:11px;color:var(--ink-3);font-family:'IBM Plex Mono';margin-top:2px}
+.alert .side{text-align:right;flex-shrink:0}
+.alert .side .tm{font-family:'IBM Plex Mono';font-size:10.5px;color:var(--ink-3)}
+.sev{display:inline-block;margin-top:5px;font-family:'IBM Plex Mono';font-size:9px;letter-spacing:.04em;padding:1px 7px;border-radius:20px;text-transform:uppercase}
+.sev.high{background:var(--fired);color:#fff}
+.sev.med{background:var(--stale-bg);color:var(--stale);border:1px solid var(--stale-line)}
+.sev.low{background:var(--unusual-bg);color:var(--unusual);border:1px solid var(--unusual-line)}
+
+/* timeline */
+.tl{list-style:none}
+.tl li{display:flex;gap:12px;padding:11px 15px;border-bottom:1px solid var(--rule);cursor:pointer}
+.tl li:last-child{border-bottom:0}
+.tl li:hover{background:var(--paper)}
+.tl .tm{font-family:'IBM Plex Mono';font-size:11px;color:var(--ink-3);width:56px;flex-shrink:0;padding-top:1px}
+.tl .ic{width:26px;height:26px;border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px;background:var(--paper);color:var(--ink-2)}
+.tl .ic.f{background:var(--fired-bg);color:var(--fired)}
+.tl .ic.u{background:var(--unusual-bg);color:var(--unusual)}
+.tl .bd{flex:1;min-width:0}
+.tl .bd p{font-size:13px;font-weight:500}
+.tl .bd span{font-size:11px;color:var(--ink-3);font-family:'IBM Plex Mono'}
+.tl .thumb{width:56px;height:40px;border-radius:5px;flex-shrink:0}
+
+/* evidence thumbnails — same picture wherever an incident is listed */
+.kft{width:52px;height:36px;border-radius:5px;flex-shrink:0;object-fit:cover;background:var(--video);cursor:pointer}
+.kft.s{width:32px;height:22px;border-radius:4px}
+.caseitem .kft{margin:-3px -2px -3px -6px}
+.kfcell{width:52px;padding-right:0!important}
+
+/* network graph */
+.graphcard svg{display:block;width:100%;height:auto;background:var(--paper)}
+
+/* map */
+.mapcard svg{display:block;width:100%;height:auto}
+.mapgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;padding:14px}
+.mapgrid.one{grid-template-columns:1fr}
+.mtile{border:1px solid var(--rule);border-radius:9px;overflow:hidden;background:var(--paper)}
+.mtile .mth{display:flex;align-items:center;gap:8px;padding:8px 11px;border-bottom:1px solid var(--rule);font-size:12px}
+.mtile .mth .mono{margin-left:auto;color:var(--ink-3);font-size:10.5px}
+.mtb{position:relative;background:#12151A;cursor:zoom-in}
+.mtb>img{display:block;width:100%;height:auto}
+.mtb>svg.ov{position:absolute;inset:0;width:100%;height:100%}
+.mtb .mk{cursor:pointer}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:11px 15px;border-top:1px solid var(--rule)}
+.legend span{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-2)}
+.legend i{width:8px;height:8px;border-radius:50%}
+
+/* entities */
+.tabs{display:flex;gap:2px;padding:0 15px;border-bottom:1px solid var(--rule)}
+.tabs button{all:unset;cursor:pointer;font-size:12.5px;color:var(--ink-3);padding:10px 10px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button:hover{color:var(--ink-2)}
+.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--ink);font-weight:500}
+.entity{display:flex;align-items:center;gap:12px;padding:11px 15px;border-bottom:1px solid var(--rule)}
+.entity:last-child{border-bottom:0}
+.entity .pic{width:44px;height:32px;border-radius:5px;flex-shrink:0;background:var(--video);object-fit:cover}
+.entity .t{flex:1;min-width:0}
+.entity .t p{font-size:13px;font-weight:500}
+.entity .t span{font-size:11px;color:var(--ink-3);font-family:'IBM Plex Mono'}
+.entity .meta{text-align:right;flex-shrink:0}
+.entity .meta .v{font-size:11px;color:var(--ink-2);font-family:'IBM Plex Mono'}
+.freq{display:inline-block;margin-top:5px;font-family:'IBM Plex Mono';font-size:9px;padding:1px 7px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em}
+.freq.high{background:var(--fired-bg);color:var(--fired);border:1px solid var(--fired-line)}
+.freq.med{background:var(--stale-bg);color:var(--stale);border:1px solid var(--stale-line)}
+.freq.low{background:var(--unusual-bg);color:var(--unusual);border:1px solid var(--unusual-line)}
+
+/* insights */
+.insight{display:flex;gap:11px;padding:13px 15px;border-bottom:1px solid var(--rule)}
+.insight:last-child{border-bottom:0}
+.insight .ic{width:28px;height:28px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px}
+.insight .ic.f{background:var(--fired-bg);color:var(--fired)}
+.insight .ic.u{background:var(--unusual-bg);color:var(--unusual)}
+.insight .ic.k{background:var(--ok-bg);color:var(--ok)}
+.insight .bd p.hd{font-size:13px;font-weight:500;margin-bottom:2px}
+.insight .bd p.dc{font-size:12.5px;color:var(--ink-2);line-height:1.5}
+.insight .bd .m{font-family:'IBM Plex Mono';font-size:10px;color:var(--ink-3);margin-top:5px}
+.insight .bd b{font-weight:500;color:var(--ink)}
+
+/* assistant */
+.chat{padding:15px}
+.msg{max-width:82%;font-size:13px;line-height:1.5;padding:10px 13px;border-radius:11px;margin-bottom:12px}
+.msg.me{margin-left:auto;background:var(--unusual);color:#fff;border-bottom-right-radius:3px}
+.msg.me .tm{color:#D6E4F5;font-family:'IBM Plex Mono';font-size:9px;display:block;text-align:right;margin-top:4px}
+.msg.bot{background:var(--paper);border:1px solid var(--rule);border-bottom-left-radius:3px}
+.msg.bot .lead{margin-bottom:9px}
+.pers{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid var(--rule)}
+.pers:first-of-type{border-top:0}
+.pers .ava{width:24px;height:24px}
+.pers .t{flex:1}.pers .t p{font-size:12.5px;font-weight:500}.pers .t span{font-family:'IBM Plex Mono';font-size:10px;color:var(--ink-3)}
+.pers a{font-size:11px;color:var(--unusual);text-decoration:none;cursor:pointer;border:1px solid var(--unusual-line);padding:3px 8px;border-radius:6px;background:var(--unusual-bg)}
+.pers a:hover{border-color:var(--unusual)}
+.composer{display:flex;align-items:center;gap:9px;padding:11px 15px;border-top:1px solid var(--rule)}
+.composer input{all:unset;flex:1;font-size:13px;color:var(--ink)}
+.composer input::placeholder{color:var(--ink-3)}
+.composer button{all:unset;cursor:pointer;width:30px;height:30px;border-radius:8px;background:var(--ink);color:var(--card);display:flex;align-items:center;justify-content:center;font-size:14px}
+.composer button:hover{opacity:.9}
+
+/* toast */
+.toasts{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:70;display:flex;flex-direction:column;gap:8px;align-items:center}
+.toast{background:var(--ink);color:var(--card);padding:11px 16px;border-radius:9px;font-size:13px;box-shadow:0 8px 30px rgba(0,0,0,.3);animation:tin .2s ease}
+@keyframes tin{from{opacity:0;transform:translateY(8px)}}
+
+.pane{display:none}.pane.on{display:block}
+
+/* ---------- shared pane building blocks ---------- */
+.panehead{display:flex;align-items:flex-end;gap:16px;margin-bottom:18px}
+.panehead h1{font-size:22px;font-family:'Space Grotesk';font-weight:500;letter-spacing:-.02em}
+.panehead p{font-size:12.5px;color:var(--ink-3);margin-top:3px;max-width:60ch}
+.panehead .r{margin-left:auto;display:flex;gap:9px;flex-shrink:0}
+.btn{all:unset;cursor:pointer;font-size:13px;font-weight:500;padding:8px 14px;border-radius:8px;border:1px solid var(--rule-2);color:var(--ink);background:var(--card-2)}
+.btn:hover{background:var(--paper)}
+.btn:focus-visible{outline:2px solid var(--unusual);outline-offset:1px}
+.btn.solid{background:var(--ink);color:var(--card);border-color:var(--ink)}
+.btn.solid:hover{opacity:.9}
+.btn-s{font-size:12px;padding:5px 11px}
+.filterbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.fsearch{display:flex;align-items:center;gap:8px;background:var(--card-2);border:1px solid var(--rule);border-radius:8px;padding:7px 11px;color:var(--ink-3);min-width:230px}
+.fsearch input{all:unset;flex:1;font-size:13px;color:var(--ink)}
+.fsearch input::placeholder{color:var(--ink-3)}
+.chip{all:unset;cursor:pointer;font-size:12px;color:var(--ink-2);padding:6px 12px;border:1px solid var(--rule);border-radius:20px;background:var(--card-2)}
+.chip:hover{border-color:var(--rule-2)}
+.chip[aria-pressed=true]{background:var(--ink);color:var(--card);border-color:var(--ink)}
+.chip .c{opacity:.55;margin-left:4px;font-family:'IBM Plex Mono'}
+.fspace{flex:1}
+
+.tablewrap{border:1px solid var(--rule);border-radius:11px;overflow:hidden;background:var(--card-2)}
+table.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);font-weight:600;padding:10px 15px;border-bottom:1px solid var(--rule);background:var(--paper);white-space:nowrap}
+.tbl td{padding:11px 15px;border-bottom:1px solid var(--rule);color:var(--ink-2);vertical-align:middle}
+.tbl tbody tr:last-child td{border-bottom:0}
+.tbl tbody tr{cursor:pointer}
+.tbl tbody tr:hover{background:var(--paper)}
+.tbl td .mono{color:var(--ink-3)}
+.tbl td b{color:var(--ink);font-weight:500}
+.dotcell{display:inline-flex;align-items:center;gap:8px}
+.d{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.d.high,.d.f{background:var(--fired)}.d.med,.d.u{background:var(--stale)}.d.low{background:var(--unusual)}
+.status{font-family:'IBM Plex Mono';font-size:10px;padding:2px 8px;border-radius:20px;white-space:nowrap}
+.status.new{background:var(--fired-bg);color:var(--fired)}
+.status.ack{background:var(--stale-bg);color:var(--stale)}
+.status.res{background:var(--ok-bg);color:var(--ok)}
+.kfdlg{margin:auto;border:1px solid var(--rule-2);border-radius:12px;background:var(--card);color:var(--ink);padding:18px;max-width:min(720px,92vw)}
+.kfdlg::backdrop{background:rgba(0,0,0,.55)}
+.kfdlg h3{font-size:14px;margin-bottom:10px;padding-right:24px}
+.kfdlg img{width:100%;border-radius:8px;background:var(--paper);display:block}
+.kfdlg .x{all:unset;cursor:pointer;position:absolute;top:14px;right:16px;font-size:18px;color:var(--ink-3)}
+.kfdlg p{font-size:11px;color:var(--ink-3);margin-top:9px}
+.kfdlg .kfnote{color:var(--stale)}
+.entdlg{max-width:min(560px,92vw)}
+.entdlg h3{margin-bottom:2px}
+.entdlg .sec{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);margin:13px 0 5px}
+.entdlg .kv{display:flex;gap:8px;font-size:12.5px;padding:4px 0;border-bottom:1px solid var(--rule)}
+.entdlg .kv span:last-child{margin-left:auto;color:var(--ink-2);font-family:'IBM Plex Mono';font-size:11.5px}
+.entdlg .cand{color:var(--stale)}
+.entact{display:flex;gap:7px;flex-wrap:wrap;margin-top:15px;padding-top:13px;border-top:1px solid var(--rule)}
+.entact input,.entact select{flex:1;min-width:120px;background:var(--paper);color:var(--ink);border:1px solid var(--rule-2);border-radius:7px;padding:6px 9px;font-size:12.5px}
+/* a button, because it acts — but it reads as the mock's "Investigate →" link */
+.linkish{background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer}
+.linkish:hover{text-decoration:underline}
+
+.split{display:grid;grid-template-columns:1fr 320px;gap:16px;align-items:start}
+.sidecard{border:1px solid var(--rule);border-radius:11px;background:var(--card-2);overflow:hidden;margin-bottom:14px}
+.sidecard h3{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);padding:12px 14px;border-bottom:1px solid var(--rule);font-weight:600}
+.sidecard .row2{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--rule);font-size:13px}
+.sidecard .row2:last-child{border-bottom:0}
+.sidecard .row2 .mono{margin-left:auto;color:var(--ink-3)}
+.sidecard .pad{padding:14px}
+.sidecard .pad p{font-size:12.5px;color:var(--ink-2);line-height:1.5;margin-bottom:9px}
+
+.scrub{border:1px solid var(--rule);border-radius:11px;background:var(--card-2);overflow:hidden;margin-bottom:16px}
+.scrub .seg2{display:flex;gap:2px;padding:9px 12px;border-bottom:1px solid var(--rule);flex-wrap:wrap;align-items:center}
+.scrub .seg2 button{all:unset;cursor:pointer;font-size:12.5px;color:var(--ink-2);padding:5px 12px;border-radius:6px}
+.scrub .seg2 button:hover{background:var(--paper)}
+.scrub .seg2 button[aria-pressed=true]{background:var(--ink);color:var(--card)}
+.scrub .seg2 .rng{margin-left:auto;color:var(--ink-3)}
+.histo{display:flex;align-items:flex-end;gap:2px;height:56px;padding:12px 14px 6px}
+.histo .bar{flex:1;background:var(--rule-2);border-radius:1px;min-height:2px}
+.histo .bar.f{background:var(--fired)}.histo .bar.u{background:var(--unusual)}
+.histo-ax{display:flex;justify-content:space-between;padding:0 14px 10px;color:var(--ink-3)}
+
+/* entities grid */
+.egrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(216px,1fr));gap:12px}
+.ecard{border:1px solid var(--rule);border-radius:11px;background:var(--card-2);overflow:hidden;cursor:pointer;transition:border-color .15s}
+.ecard:hover{border-color:var(--rule-2)}
+.ecard .pic{width:100%;height:118px;display:block;background:var(--video);object-fit:cover}
+.ecard .b{padding:11px 13px}
+.ecard .b p{font-size:14px;font-weight:500}
+.ecard .b span{font-size:11.5px;color:var(--ink-3);font-family:'IBM Plex Mono'}
+.ecard .b .tags{margin-top:9px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+
+/* cases */
+.casecard{border:1px solid var(--rule);border-radius:11px;background:var(--card-2);padding:16px;margin-bottom:12px}
+.casecard .top{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.casecard h3{font-size:15px}
+.casestat{font-family:'IBM Plex Mono';font-size:9px;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em}
+.casestat.open{background:var(--fired-bg);color:var(--fired)}
+.casestat.review{background:var(--stale-bg);color:var(--stale)}
+.casestat.closed{background:var(--ok-bg);color:var(--ok)}
+.casecard .desc{font-size:12.5px;color:var(--ink-2);margin-bottom:12px;max-width:70ch;line-height:1.55}
+.caselinks{display:flex;gap:6px;flex-wrap:wrap}
+.caselinks svg{width:62px;height:44px;border-radius:5px}
+.caseitem{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 9px;border:1px solid var(--rule-2);border-radius:20px;background:var(--paper);color:var(--ink-2)}
+.caseitem[data-ent]{cursor:pointer}
+.caseitem[data-ent]:hover{border-color:var(--unusual);color:var(--ink)}
+/* M8: the report controls sit in a panehead, where a raw <select> looks foreign */
+.panehead select{background:var(--paper);color:var(--ink);border:1px solid var(--rule-2);border-radius:7px;padding:6px 22px 6px 9px;font-size:12px}
+.panehead .r>*{white-space:nowrap}
+#caseDesc{background:var(--paper);color:var(--ink);border:1px solid var(--rule-2);border-radius:7px;padding:6px 9px;font-size:12.5px}
+.casemeta{display:flex;gap:18px;margin-top:12px;padding-top:12px;border-top:1px solid var(--rule);font-family:'IBM Plex Mono';font-size:11px;color:var(--ink-3);flex-wrap:wrap}
+
+/* settings + forms */
+.setrow{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 0;border-bottom:1px solid var(--rule)}
+.setrow:last-child{border-bottom:0}
+.setrow .t{max-width:62ch}
+.setrow .t p{font-size:14px;font-weight:500}
+.setrow .t span{font-size:12.5px;color:var(--ink-3)}
+.sw{width:36px;height:20px;border-radius:20px;background:var(--ok);position:relative;flex-shrink:0;cursor:pointer;border:0;padding:0}
+.sw:after{content:'';position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.15s}
+.sw.off{background:var(--rule-2)}.sw.off:after{right:auto;left:2px}
+.formcard{border:1px solid var(--rule);border-radius:11px;background:var(--card-2);overflow:hidden;margin-bottom:16px}
+.formcard>.h2{padding:13px 15px;border-bottom:1px solid var(--rule)}
+.formcard>.h2 h3{font-size:14px}.formcard>.h2 p{font-size:12px;color:var(--ink-3);margin-top:2px}
+.formcard>.b{padding:15px}
+.field{margin-bottom:16px}.field:last-child{margin-bottom:0}
+.field label{display:block;font-size:13px;font-weight:500;margin-bottom:5px}
+.field .hint{font-size:12px;color:var(--ink-3);margin-bottom:7px}
+input[type=text],input[type=password],textarea,select{width:100%;font:400 13px Inter,sans-serif;color:var(--ink);background:var(--card-2);border:1px solid var(--rule-2);border-radius:8px;padding:9px 11px;resize:vertical}
+input[type=text]:focus,input[type=password]:focus,textarea:focus,select:focus{outline:2px solid var(--unusual);outline-offset:-1px;border-color:transparent}
+.seg-days{display:flex;gap:1px;flex-wrap:wrap}
+.seg-days button{all:unset;cursor:pointer;font-size:12px;padding:7px 12px;background:var(--paper);color:var(--ink-2)}
+.seg-days button[aria-pressed=true]{background:var(--unusual);color:#fff}
+.seg-days button:first-child{border-radius:7px 0 0 7px}.seg-days button:last-child{border-radius:0 7px 7px 0}
+.deliv{display:flex;gap:9px;flex-wrap:wrap}
+.deliv .opt{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:8px 13px;border:1px solid var(--rule-2);border-radius:8px;font-size:13px;color:var(--ink-2)}
+.deliv .opt[aria-pressed=true]{border-color:var(--unusual);background:var(--unusual-bg);color:var(--unusual)}
+.pill{font-family:'IBM Plex Mono';font-size:10px;padding:2px 8px;border-radius:20px}
+.pill.up{background:var(--ok-bg);color:var(--ok)}
+.pill.down{background:var(--stale-bg);color:var(--stale)}
+.mrow{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--rule)}
+.mrow:last-child{border-bottom:0}
+
+/* live wall */
+.wall{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.offline svg{filter:grayscale(1);opacity:.45}
+
+/* graph big */
+.bigraph{border:1px solid var(--rule);border-radius:11px;background:var(--paper);overflow:hidden}
+.bigraph svg{display:block;width:100%;height:auto}
+.bigraph .foot{border-top:1px solid var(--rule);background:var(--card-2);padding:11px 15px;display:flex;gap:16px;flex-wrap:wrap}
+#gcanvas{height:min(62vh,540px);position:relative}
+#gmini{height:230px;background:var(--paper)}
+.ctxm{position:absolute;z-index:40;min-width:172px;background:var(--card-2);border:1px solid var(--rule-2);border-radius:8px;box-shadow:var(--shadow);overflow:hidden}
+.ctxm .hd{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);padding:8px 11px;border-bottom:1px solid var(--rule)}
+.ctxm button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--ink);font:inherit;font-size:12.5px;padding:8px 11px;cursor:pointer}
+.ctxm button:hover{background:var(--paper)}
+.gbanner{position:absolute;left:12px;top:12px;z-index:30;display:flex;align-items:center;gap:10px;background:var(--card-2);border:1px solid var(--rule-2);border-radius:8px;padding:7px 11px;font-size:12px;box-shadow:var(--shadow)}
+.gbanner button{background:none;border:0;color:var(--unusual);font:inherit;font-size:11.5px;cursor:pointer;text-decoration:underline}
+.sidecard .row2.link{cursor:pointer}
+.sidecard .row2.link:hover{background:var(--paper)}
+.sidecard .row2 .kill{margin-left:6px;background:none;border:0;color:var(--ink-3);cursor:pointer;font-size:14px;line-height:1}
+.sidecard .row2 .kill:hover{color:var(--fired)}
+.sidecard .cand{color:var(--stale)}
+.sidecard .kfg{display:flex;gap:6px;flex-wrap:wrap;padding:12px 14px}
+.sidecard .kfg img{width:76px;height:44px;object-fit:cover;border-radius:5px;border:1px solid var(--rule)}
+
+/* assistant full */
+.convo{max-width:760px}
+.suggest{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+.suggest button{all:unset;cursor:pointer;font-size:12.5px;color:var(--unusual);border:1px solid var(--unusual-line);background:var(--unusual-bg);padding:7px 12px;border-radius:8px}
+.suggest button:hover{border-color:var(--unusual)}
+.evchips{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.evchip{display:inline-flex;align-items:center;gap:6px;background:var(--card-2);border:1px solid var(--rule-2);border-radius:7px;padding:2px 8px 2px 2px;cursor:pointer}
+.evchip:hover{border-color:var(--ink-3)}
+.evchip svg,.evchip img{width:34px;height:24px;border-radius:3px;display:block;object-fit:cover;background:var(--video)}
+.evchip .mono{color:var(--ink-2)}
+.trace{border:1px solid var(--rule);border-radius:10px;margin-top:16px;overflow:hidden;background:var(--card-2)}
+.trace summary{cursor:pointer;padding:12px 15px;font-size:12.5px;color:var(--ink-2);list-style:none}
+.trace summary::-webkit-details-marker{display:none}
+.trace summary:before{content:'▸ ';color:var(--ink-3)}.trace[open] summary:before{content:'▾ '}
+.trace pre{border-top:1px solid var(--rule);background:var(--paper);padding:14px;overflow:auto;color:var(--ink-2);font-family:'IBM Plex Mono';font-size:11px;line-height:1.7}
+
+/* command palette (M9) */
+.cmddlg{width:min(560px,92vw);padding:0;margin:9vh auto auto}
+.cmddlg>input{width:100%;border:0;border-bottom:1px solid var(--rule);padding:15px 17px;font-size:14px;background:transparent;color:var(--ink)}
+.cmddlg>input:focus{outline:none}
+.cmdlist{max-height:min(50vh,400px);overflow:auto;padding:6px}
+.cmdrow{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;cursor:pointer;font-size:13px}
+.cmdrow[aria-selected=true]{background:var(--card-2)}
+.cmdrow .ic{width:18px;text-align:center;color:var(--ink-3)}
+.cmdrow .k{font-family:'IBM Plex Mono';font-size:10px;color:var(--ink-3);margin-left:auto}
+
+/* a11y: everything clickable that wasn't already covered (NFR-2) */
+.chip:focus-visible,.tabs button:focus-visible,.viewseg button:focus-visible,
+.kbtn:focus-visible,.linkish:focus-visible,.seg2 button:focus-visible,
+.seg-days button:focus-visible,.themebtn:focus-visible,.x:focus-visible,
+.bell:focus-visible,.assist-btn:focus-visible{outline:2px solid var(--unusual);outline-offset:1px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* mobile */
+@media(max-width:960px){
+  body{padding:0}
+  .app{grid-template-columns:1fr;border-radius:0;min-height:100vh}
+  .rail{flex-direction:row;align-items:center;overflow-x:auto;padding:10px 12px;border-right:0;border-bottom:1px solid var(--rule);gap:6px}
+  .brand,.kbtn,.railfoot{display:none}
+  .nav{flex-direction:row;margin:0;gap:4px}
+  .nav button span:not(.ico):not(.badge){display:none}
+  .cams,.row-3,.row-3b{grid-template-columns:1fr}
+  .search{max-width:none}
+  .who p,.who span{display:none}
+  .split{grid-template-columns:1fr}
+  .wall{grid-template-columns:1fr 1fr}
+  .panehead{flex-wrap:wrap}.panehead .r{margin-left:0}
+  .tablewrap{overflow-x:auto}
+}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.sr:focus{width:auto;height:auto;clip:auto;z-index:9;top:8px;left:8px;background:var(--ink);color:var(--card);padding:8px 13px;border-radius:8px;font-size:13px}
+.main:focus{outline:none}
+</style>
+
+<div class="app" id="app">
+
+  <a href="#main" class="sr">Skip to content</a>
+
+  <!-- ================= RAIL ================= -->
+  <nav class="rail">
+    <div class="brand">
+      <span class="glyph" aria-hidden="true"></span>
+      <div><b>INTELLIGENCE OS</b><span class="sub">from pixels to intelligence</span></div>
+    </div>
+    <button class="kbtn" id="openCmd"><span>Search or jump…</span><span class="sp"></span><kbd>⌘K</kbd></button>
+    <div class="nav">
+      <button data-p="dashboard" aria-current="true"><span class="ico">▤</span><span>Dashboard</span></button>
+      <button data-p="live"><span class="ico">▷</span><span>Live View</span></button>
+      <button data-p="timeline"><span class="ico">◷</span><span>Timeline</span></button>
+      <button data-p="map"><span class="ico">◎</span><span>Map View</span></button>
+      <button data-p="graph"><span class="ico">◇</span><span>Network Graph</span></button>
+      <button data-p="alerts"><span class="ico">◔</span><span>Alerts</span><span class="badge" id="alertBadge" hidden>0</span></button>
+      <button data-p="entities"><span class="ico">◈</span><span>Entities</span></button>
+      <button data-p="cases"><span class="ico">▭</span><span>Cases</span></button>
+      <button data-p="reports"><span class="ico">≡</span><span>Reports</span></button>
+      <button data-p="assistant"><span class="ico">✦</span><span>AI Assistant</span></button>
+      <button data-p="cameras"><span class="ico">◲</span><span>Camera Manager</span></button>
+      <button data-p="settings"><span class="ico">⚙</span><span>System Settings</span></button>
+    </div>
+    <div class="railfoot">
+      <div class="sysh">System status</div>
+      <div class="stat-line"><span class="g"><span class="led"></span>Cameras online</span><span class="v" id="sysCams">—</span></div>
+      <div class="stat-line"><span class="g"><span class="led"></span>AI engine</span><span class="v" id="sysEngine">—</span></div>
+      <div class="stat-line"><span>Storage</span><span class="v" id="sysStore">—</span></div>
+      <div class="meter"><i id="sysStoreBar" style="width:0%"></i></div>
+      <div class="stat-line"><span>CPU</span><span class="v" id="sysCpu">—</span></div>
+      <div class="meter"><i id="sysCpuBar" style="width:0%"></i></div>
+      <div class="stat-line"><span>Memory</span><span class="v" id="sysMem">—</span></div>
+      <div class="meter"><i id="sysMemBar" style="width:0%"></i></div>
+      <button class="themebtn" id="themeBtn"><span id="themeIco">◐</span><span id="themeTxt">Dark mode</span></button>
+    </div>
+  </nav>
+
+  <!-- ================= MAIN ================= -->
+  <main class="main" id="main" tabindex="-1">
+    <div class="topbar">
+      <label class="search" for="topSearch"><span class="mono">⌕</span><input id="topSearch" placeholder="Search for people, vehicles, locations…"><kbd>⌘K</kbd></label>
+      <div class="topright">
+        <button class="assist-btn" onclick="go('assistant')"><span>✦</span>AI Assistant</button>
+        <button class="bell" onclick="go('alerts')" aria-label="Notifications">◔<span class="cnt" id="bellCount" hidden>0</span></button>
+        <div class="who" onclick="go('settings')">
+          <span class="ava" id="userAva">··</span>
+          <div><p id="userName">—</p><span>signed in</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------- DASHBOARD ---------- -->
+    <section class="pane on canvas" id="dashboard">
+
+      <!-- Live cameras -->
+      <div class="sect">
+        <h2>Live cameras</h2>
+        <span class="online" id="dashOnline"><i></i>— online</span>
+        <div class="r">
+          <div class="viewseg" role="group" aria-label="Layout">
+            <button aria-pressed="true">⊞</button><button>▤</button><button>▭</button><button>⊟</button>
+          </div>
+          <a onclick="go('live')">View all →</a>
+        </div>
+      </div>
+      <div class="cams" id="cams"></div>
+
+      <!-- Alerts / Timeline / (spans) -->
+      <div class="row-3">
+        <div class="card">
+          <div class="h"><h2>Activity timeline</h2><div class="r"><span class="mono" style="color:var(--ink-3)">today · 10 May</span></div></div>
+          <ul class="tl" id="dashTimeline"></ul>
+        </div>
+
+        <div class="card graphcard">
+          <div class="h"><h2>Network graph</h2><div class="r"><a onclick="go('graph')">Expand →</a></div></div>
+          <div id="gmini"></div>
+        </div>
+
+        <div class="card">
+          <div class="h"><h2>Alerts</h2><div class="r"><a onclick="go('alerts')">View all →</a></div></div>
+          <div id="dashAlerts"></div>
+        </div>
+      </div>
+
+      <!-- Map / Entities / Insights / Assistant -->
+      <div class="row-3b">
+
+        <div class="card mapcard" style="grid-column:span 2">
+          <div class="h"><h2>Map overview</h2><div class="r"><a onclick="go('map')">Full map →</a></div></div>
+          <div class="mapgrid" id="dashMapGrid"></div>
+          <div class="legend" id="dashMapLegend"></div>
+        </div>
+
+        <div class="card">
+          <div class="h"><h2>Top entities</h2></div>
+          <div class="tabs" role="tablist" id="dashEntTabs">
+            <button role="tab" data-etab="person" aria-selected="true">People</button>
+            <button role="tab" data-etab="object">Objects</button>
+          </div>
+          <div id="dashEntities"></div>
+        </div>
+
+      </div>
+
+      <div class="row-3b" style="margin-top:16px">
+        <div class="card" style="grid-column:span 2">
+          <div class="h"><h2>AI insights</h2><div class="r"><a id="insightsAll">View all →</a></div></div>
+          <div id="insights"></div>
+        </div>
+
+        <div class="card">
+          <div class="h"><h2>AI assistant</h2></div>
+          <div class="chat" id="dashAsk"></div>
+          <div class="composer"><input id="dashAskInput" placeholder="Ask anything about your data…"><button id="dashAskSend" aria-label="Send">→</button></div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ---------- LIVE VIEW ---------- -->
+    <section class="pane canvas" id="live">
+      <div class="panehead">
+        <div><h1>Live View</h1><p id="liveSub">Detections drawn in real time.</p></div>
+        <div class="r"><span class="online" style="align-self:center" id="liveOnline"><i></i>— online</span><button class="btn btn-s" id="pauseAllBtn">⏸ Pause all</button><button class="btn btn-s" id="refreshFeeds">↻ Refresh</button></div>
+      </div>
+      <div class="filterbar" id="liveFilters">
+        <button class="chip" data-f="all" aria-pressed="true">All <span class="c">0</span></button>
+        <button class="chip" data-f="online">Online <span class="c">0</span></button>
+        <button class="chip" data-f="offline">Offline <span class="c">0</span></button>
+        <span class="fspace"></span>
+        <label class="fsearch" style="min-width:180px"><span class="mono">⌕</span><input id="liveSearch" placeholder="Find a camera…"></label>
+      </div>
+      <div class="wall" id="wall"></div>
+    </section>
+
+    <!-- ---------- TIMELINE ---------- -->
+    <section class="pane canvas" id="timeline">
+      <div class="panehead">
+        <div><h1>Timeline</h1><p>Every detection today, oldest to newest, across all cameras.</p></div>
+        <div class="r"><button class="btn btn-s" onclick="toast('Exporting timeline')">Export</button></div>
+      </div>
+      <div class="scrub">
+        <div class="seg2" id="tlRange">
+          <button data-h="24" aria-pressed="true">Last 24h</button><button data-h="48">Last 48h</button><button data-h="168">Last 7 days</button>
+          <span class="rng mono" id="tlRng"></span>
+        </div>
+        <div class="histo" id="tlhisto"></div>
+        <div class="histo-ax mono" id="tlAxis"></div>
+      </div>
+      <div class="filterbar" id="tlFilters">
+        <button class="chip" data-t="" aria-pressed="true">All events <span class="c">0</span></button>
+        <button class="chip" data-t="alerts">Alerts only <span class="c">0</span></button>
+        <button class="chip" data-t="person">People <span class="c">0</span></button>
+        <button class="chip" data-t="object">Objects <span class="c">0</span></button>
+      </div>
+      <div class="card"><ul class="tl" id="tlfull"></ul></div>
+    </section>
+
+    <!-- ---------- MAP VIEW ---------- -->
+    <section class="pane canvas" id="map">
+      <div class="panehead">
+        <div><h1>Map View</h1><p id="mapSub">Zones as the cameras see them, with everything last seen in each.</p></div>
+        <div class="r">
+          <div class="seg2" id="mapRange"><button data-h="6">6h</button><button data-h="24" aria-pressed="true">24h</button><button data-h="168">7 days</button></div>
+          <button class="btn btn-s" id="mapRecenter">⤢ Show all</button>
+        </div>
+      </div>
+      <div class="split">
+        <div class="card mapcard">
+          <div class="mapgrid" id="mapGrid"></div>
+          <div class="legend" id="mapLegend"></div>
+        </div>
+        <div>
+          <div class="sidecard"><h3>Live on map</h3><div id="mapLive"></div></div>
+          <div class="sidecard"><h3>Zones</h3><div id="mapZones"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- NETWORK GRAPH ---------- -->
+    <section class="pane canvas" id="graph">
+      <div class="panehead"><div><h1>Network Graph</h1><p id="graphSub">How people, objects and zones connect — everything the system believes.</p></div><div class="r"><button class="btn btn-s" id="gRelayout">Re-layout</button><button class="btn btn-s" id="gRefresh">↻ Refresh</button></div></div>
+      <div class="split">
+        <div class="bigraph">
+          <div id="gcanvas"></div>
+          <div class="foot mono"><span style="color:var(--ink-3)">shift-click two nodes → path</span><span style="color:var(--ink-3)">right-click → expand</span><span style="margin-left:auto;color:var(--ink-3)" id="gCounts">—</span></div>
+        </div>
+        <div id="gSide">
+          <div class="sidecard"><h3 id="gSelTitle">Selected</h3><div id="gSel"></div></div>
+        </div>
+      </div>
+    </section>
+    <!-- ---------- ALERTS ---------- -->
+    <section class="pane canvas" id="alerts">
+      <div class="panehead"><div><h1>Alerts</h1><p id="alertSub">Triage by severity, camera or type — acknowledge or resolve.</p></div><div class="r"><button class="btn btn-s" id="markAllRead">Mark all read</button><button class="btn btn-s solid" onclick="go('settings')">New rule</button></div></div>
+      <div class="filterbar" id="alertFilters">
+        <label class="fsearch"><span class="mono">⌕</span><input id="alertSearch" placeholder="Search alerts…"></label>
+        <button class="chip" data-sev="" aria-pressed="true">All <span class="c">0</span></button>
+        <button class="chip" data-sev="high"><span class="dotcell"><span class="d high"></span>High <span class="c">0</span></span></button>
+        <button class="chip" data-sev="medium"><span class="dotcell"><span class="d med"></span>Medium <span class="c">0</span></span></button>
+        <button class="chip" data-sev="low"><span class="dotcell"><span class="d low"></span>Low <span class="c">0</span></span></button>
+        <span class="fspace"></span>
+        <button class="chip" data-st="new">New <span class="c">0</span></button><button class="chip" data-st="acknowledged">Acknowledged <span class="c">0</span></button><button class="chip" data-st="resolved">Resolved <span class="c">0</span></button>
+      </div>
+      <div class="tablewrap">
+        <table class="tbl">
+          <thead><tr><th></th><th>Severity</th><th>Alert</th><th>Camera</th><th>Time</th><th>Status</th><th></th></tr></thead>
+          <tbody id="alertRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- ENTITIES ---------- -->
+    <section class="pane canvas" id="entities">
+      <div class="panehead"><div><h1>Entities</h1><p id="entSub">Every person and object the system has tracked and remembered.</p></div><div class="r"><button class="btn btn-s" id="entRefresh">↻ Refresh</button></div></div>
+      <div class="filterbar" id="entFilters">
+        <label class="fsearch"><span class="mono">⌕</span><input id="entSearch" placeholder="Search entities…"></label>
+        <button class="chip" data-etab="person" aria-pressed="true">People <span class="c">0</span></button>
+        <button class="chip" data-etab="object">Objects <span class="c">0</span></button>
+      </div>
+      <div class="egrid" id="entGrid"></div>
+    </section>
+
+    <!-- ---------- CASES ---------- -->
+    <section class="pane canvas" id="cases">
+      <div class="panehead"><div><h1>Cases</h1><p>Group related events, entities and alerts into an investigation you can track and share.</p></div><div class="r"><button class="btn btn-s solid" id="caseNew">+ New case</button></div></div>
+      <div class="filterbar" id="caseFilters">
+        <button class="chip" data-st="" aria-pressed="true">All <span class="c">0</span></button>
+        <button class="chip" data-st="open">Open <span class="c">0</span></button>
+        <button class="chip" data-st="review">In review <span class="c">0</span></button>
+        <button class="chip" data-st="closed">Closed <span class="c">0</span></button>
+      </div>
+      <div id="caseList"></div>
+    </section>
+
+    <!-- ---------- REPORTS ---------- -->
+    <section class="pane canvas" id="reports">
+      <div class="panehead"><div><h1>Reports</h1><p>Scheduled digests and one-off exports. Delivered by email, webhook or download.</p></div>
+        <div class="r">
+          <select id="repRange" aria-label="Range"><option value="24">24 hours</option><option value="168">7 days</option><option value="720">30 days</option></select>
+          <select id="repFmt" aria-label="Format"><option value="html">HTML</option><option value="csv">CSV</option></select>
+          <button class="btn btn-s solid" id="repGo">+ Generate</button>
+        </div></div>
+      <div class="split">
+        <div>
+          <div class="sect"><h2 style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);font-weight:600">Recent reports</h2></div>
+          <div class="tablewrap" style="margin-bottom:20px">
+            <table class="tbl">
+              <thead><tr><th>Report</th><th>Range</th><th>Generated</th><th>Format</th><th></th></tr></thead>
+              <tbody id="reportRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <div class="sidecard"><h3>Scheduled</h3><div id="repSched"></div></div>
+          <div class="sidecard"><div class="pad"><p>Reports pull from the same memory graph as the assistant, and are stored as generated — reopening one shows what memory said then, not now.</p><button class="btn btn-s" id="repSchedGo">Manage schedule</button></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- AI ASSISTANT (full) ---------- -->
+    <section class="pane canvas" id="assistant">
+      <div class="panehead"><div><h1>AI Assistant</h1><p>Ask about anything the cameras saw. Every claim comes with the keyframe behind it.</p></div></div>
+      <div class="convo">
+        <div class="suggest" id="askSuggest">
+          <button>Who was seen in the last hour?</button>
+          <button>What happened today?</button>
+          <button>Which rules fired this week?</button>
+        </div>
+        <div class="chat" style="padding:0" id="askLog"></div>
+        <div class="card" style="margin-top:16px"><div class="composer"><input id="askInput" placeholder="Ask anything about your data…"><button id="askSend" aria-label="Send">→</button></div></div>
+      </div>
+    </section>
+
+    <!-- ---------- CAMERA MANAGER ---------- -->
+    <section class="pane canvas" id="cameras">
+      <div class="panehead"><div><h1>Camera Manager</h1><p id="camSub">Add sources, name them, and draw zones rules can watch.</p></div><div class="r"><button class="btn btn-s" id="camTestAll">Test all</button></div></div>
+      <div class="split">
+        <div>
+          <div class="tablewrap" style="margin-bottom:20px">
+            <table class="tbl">
+              <thead><tr><th>Camera</th><th>Source</th><th>Zones</th><th>Status</th><th></th></tr></thead>
+              <tbody id="camRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <div class="formcard">
+            <div class="h2"><h3>Add a camera</h3><p>An RTSP URL, a USB device index, or a video file to replay.</p></div>
+            <div class="b">
+              <div class="field"><label for="csrc">Source</label><input id="csrc" type="text" placeholder="rtsp://10.0.1.22:554/stream1"></div>
+              <div class="field"><label for="cnm">Name</label><p class="hint">Rules refer to cameras by name — pick something you'd say out loud.</p><input id="cnm" type="text" placeholder="back_gate"></div>
+              <div style="display:flex;gap:9px;align-items:center"><button class="btn solid" id="camAdd">Add camera</button><button class="btn" id="camTest">Test</button><span class="mono" id="camTestOut" style="font-size:11.5px;color:var(--ink-3)"></span></div>
+              <p class="hint" style="margin-top:10px">A new camera starts capturing on the next restart — we don't hot-swap a running pipeline.</p>
+            </div>
+          </div>
+          <div class="formcard">
+            <div class="h2"><h3>Draw a zone</h3><p>Click the still to place corners. Rules can name a zone instead of the whole view.</p></div>
+            <div class="b">
+              <div class="field"><label for="zcam">Camera</label><select id="zcam"></select></div>
+              <div id="zwrap" style="position:relative;border:1px solid var(--rule);border-radius:8px;overflow:hidden;line-height:0">
+                <img id="zshot" alt="still frame for zone drawing" style="width:100%;display:block">
+                <svg id="zsvg" style="position:absolute;inset:0;width:100%;height:100%;cursor:crosshair"></svg>
+              </div>
+              <div class="field" style="margin-top:12px"><label for="znm">Zone name</label><input id="znm" type="text" placeholder="gate_apron"></div>
+              <div style="display:flex;gap:9px"><button class="btn solid" id="zsave">Save zone</button><button class="btn" id="zclear">Clear</button><span class="mono" id="zcount" style="font-size:11.5px;color:var(--ink-3);align-self:center"></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- SYSTEM SETTINGS ---------- -->
+    <section class="pane canvas" id="settings">
+      <div class="panehead"><div><h1>System Settings</h1><p>Delivery, team, retention and the AI engine — one folder holds all of it.</p></div></div>
+      <div class="split">
+        <div>
+          <div class="formcard">
+            <div class="h2"><h3>Report delivery</h3><p>The point is not to open the app. Have the briefing come to you.</p></div>
+            <div class="b">
+              <div class="field"><label>Send the digest</label><div class="seg-days" id="setSched"><button data-v="off">Off</button><button data-v="daily">Daily 08:00</button><button data-v="twice_daily">Twice daily</button><button data-v="realtime">Real-time</button></div></div>
+              <div class="field"><label>Where</label><div class="deliv" id="setSink"><button class="opt" data-v="email">✉ Email</button><button class="opt" data-v="webhook">◇ Webhook</button><button class="opt" data-v="telegram">✈ Telegram</button><button class="opt" data-v="in_app">▤ In-app</button></div></div>
+              <div class="field" id="setTgField"><label for="setTg">Telegram bot token</label><p class="hint">From @BotFather. Shared by everyone on the team; each person sets their own chat id below.</p><div style="display:flex;gap:9px"><input id="setTg" type="password" placeholder="123456:ABC…" style="flex:1"><button class="btn btn-s" id="setTgSave">Save</button><span class="pill" id="setTgPill" style="align-self:center">—</span></div></div>
+              <div class="field" id="setDestField"><label for="setDest">Destination</label><p class="hint" id="setDestHint">Where the briefing lands — an address, or a URL to POST to.</p><div style="display:flex;gap:9px"><input id="setDest" type="text" placeholder="you@example.com" style="flex:1"><button class="btn btn-s" id="setDestTest">Send test</button></div></div>
+            </div>
+          </div>
+          <div class="formcard">
+            <div class="h2"><h3>Team</h3><p>Everyone sees the same data. Confirmations and assignments are attributed.</p></div>
+            <div class="b" style="padding-top:4px" id="setTeam"></div>
+          </div>
+          <div class="formcard">
+            <div class="h2"><h3>Engine &amp; data</h3></div>
+            <div class="b" style="padding-top:2px">
+              <div class="setrow"><div class="t"><p>Face matching</p><span id="setFaceNote">Off. Entities are track IDs like Person 01. Nearly every rule works without it.</span></div><button class="sw off" id="setFace" aria-label="Toggle face matching" aria-pressed="false"></button></div>
+              <div class="setrow"><div class="t"><p>Anthropic API key</p><span>Optional. Without it, detection, tracking and memory still run. Only visual-verify rules pause.</span></div><span class="pill" id="setKeyPill">—</span></div>
+              <div class="field" style="margin:14px 0;display:flex;gap:9px"><input id="setKey" type="password" placeholder="sk-ant-…" style="flex:1"><button class="btn btn-s" id="setKeySave">Save key</button></div>
+              <div class="setrow"><div class="t"><p>Keep keyframes for</p><span>Keyframes delete on this schedule. The graph of what happened is kept.</span></div><span style="display:flex;gap:6px;align-items:center"><input id="setRet" type="number" min="1" max="3650" style="width:78px"><span class="mono" style="color:var(--ink-3)">days</span><button class="btn btn-s" id="setRetSave">Save</button></span></div>
+              <div class="setrow"><div class="t"><p>Data directory</p><span>One folder. Back it up or move it, and nothing else needs to come along.</span></div><span class="mono" id="setDir" style="color:var(--ink-3)">—</span></div>
+              <div style="display:flex;gap:9px;margin-top:16px"><button class="btn" id="setExport">Export memory</button><button class="btn" id="setRebuild">Rebuild baseline</button></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="sidecard"><h3>System health</h3>
+            <div class="row2"><span>Cameras online</span><span class="mono" id="setCams">—</span></div>
+            <div class="row2"><span>AI engine</span><span class="pill" id="setEngine" style="margin-left:auto">—</span></div>
+            <div class="row2"><span>Storage used</span><span class="mono" id="setStore">—</span></div>
+            <div class="row2"><span>Reasoning calls</span><span class="mono" id="setCalls">—</span></div>
+          </div>
+          <div class="sidecard"><div class="pad"><p>This system answers what happened. It is not a safety interlock and will not stop anything in progress.</p><span class="mono" style="color:var(--ink-3)">scope · retrospective</span></div></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- keyframe viewer — native <dialog>: Esc, backdrop and focus trap are free -->
+<dialog id="kfDlg" class="kfdlg">
+  <form method="dialog"><button class="x" aria-label="Close">×</button></form>
+  <h3 id="kfTitle"></h3>
+  <img id="kfImg" alt="event keyframe">
+  <p class="mono" id="kfMeta"></p>
+  <p class="mono kfnote">saved keyframes only · no continuous video is stored</p>
+  <div class="entact"><button class="btn btn-s" id="kfCase">+ Add to case</button></div>
+</dialog>
+
+<!-- entity profile — same native <dialog> as the keyframe viewer -->
+<dialog id="entDlg" class="kfdlg entdlg">
+  <form method="dialog"><button class="x" aria-label="Close">×</button></form>
+  <h3 id="entTitle"></h3>
+  <p class="mono" id="entMeta"></p>
+  <div id="entBody"></div>
+  <div class="entact">
+    <input id="entRename" placeholder="rename…" aria-label="New label">
+    <button class="btn btn-s" id="entRenameGo">Rename</button>
+    <select id="entMergeTarget" aria-label="Merge into"></select>
+    <button class="btn btn-s" id="entMergeGo">Merge into →</button>
+    <button class="btn btn-s" id="entCase">+ Add to case</button>
+    <button class="btn btn-s" id="entGraph">Graph →</button>
+  </div>
+</dialog>
+
+<!-- attach-to-case: pick an open case or start one, from any detail view (FR-CS-3) -->
+<dialog id="caseDlg" class="kfdlg entdlg">
+  <form method="dialog"><button class="x" aria-label="Close">×</button></form>
+  <h3 id="caseDlgT">Add to case</h3>
+  <p class="mono" id="caseDlgSub"></p>
+  <div id="caseDlgPick">
+    <p class="sec">Existing case</p>
+    <div class="entact"><select id="caseDlgSel" aria-label="Case"></select><button class="btn btn-s" id="caseAttachGo">Attach</button></div>
+  </div>
+  <p class="sec">New case</p>
+  <div class="entact">
+    <input id="caseTitle" placeholder="case title…" aria-label="Case title">
+    <button class="btn btn-s solid" id="caseCreateGo">Create</button>
+  </div>
+  <input id="caseDesc" placeholder="what happened (optional)" aria-label="Case description" style="width:100%;margin-top:8px">
+</dialog>
+
+<!-- ⌘K palette (FR-SH-5) — jump to anything the shell already knows about -->
+<dialog id="cmdDlg" class="kfdlg cmddlg">
+  <input id="cmdQ" autocomplete="off" aria-label="Search or jump to"
+         placeholder="Jump to a pane, camera, entity or rule — or ask a question…">
+  <div class="cmdlist" id="cmdList" role="listbox" aria-label="Results"></div>
+</dialog>
+
+<div class="toasts" id="toasts"></div>
+
+<script type="module">
+/* ================================================================
+   V4 Shell — M1. Panes wire themselves in later milestones; nothing
+   here fabricates data.
+   ================================================================ */
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const j=(url,opts)=>fetch(url,opts).then(r=>r.json());
+window.esc=esc; window.j=j;
+
+/* ---------- nav (FR-SH-2a: hash routes, never a page load) ---------- */
+const titles={dashboard:'Dashboard',live:'Live View',timeline:'Timeline',map:'Map View',graph:'Network Graph',alerts:'Alerts',entities:'Entities',cases:'Cases',reports:'Reports',assistant:'AI Assistant',cameras:'Camera Manager',settings:'System Settings'};
+const btns=[...document.querySelectorAll('.nav button')];
+const onEnter={};                      // pane id -> fn(extra), filled by later milestones
+window.onEnter=onEnter;
+
+function go(p,extra,replace){
+  if(!titles[p]) p='dashboard';
+  /* a modal outlives a hash change otherwise, and sits over the pane you asked for */
+  document.querySelectorAll('dialog[open]').forEach(d=>d.close());
+  btns.forEach(x=>x.getAttribute('data-p')===p?x.setAttribute('aria-current','true'):x.removeAttribute('aria-current'));
+  document.querySelectorAll('.pane').forEach(x=>x.classList.remove('on'));
+  $(p).classList.add('on');
+  /* boot replaces so the first Back leaves the app, not just the hash */
+  if(location.hash.slice(1)!==p) history[replace?'replaceState':'pushState'](null,'','#'+p);
+  try{localStorage.setItem('io-pane',p);}catch(e){}
+  onEnter[p]?.(extra);
+  window.scrollTo(0,0);
+}
+window.go=go;
+btns.forEach(b=>b.onclick=()=>go(b.dataset.p));
+addEventListener('popstate',()=>go(location.hash.slice(1)||'dashboard'));
+
+/* ---------- theme ---------- */
+const root=document.documentElement;
+function setTheme(dark){
+  if(dark){root.setAttribute('data-theme','dark');$('themeTxt').textContent='Light mode';$('themeIco').textContent='◑';}
+  else{root.removeAttribute('data-theme');$('themeTxt').textContent='Dark mode';$('themeIco').textContent='◐';}
+  try{localStorage.setItem('io-theme',dark?'dark':'light');}catch(e){}
+  dispatchEvent(new CustomEvent('themechange',{detail:{dark}}));
+}
+try{if(localStorage.getItem('io-theme')==='dark')setTheme(true);}catch(e){}
+$('themeBtn').onclick=()=>setTheme(root.getAttribute('data-theme')!=='dark');
+
+/* ---------- toast ---------- */
+function toast(msg){const t=$('toasts');const el=document.createElement('div');el.className='toast';el.textContent=msg;t.appendChild(el);setTimeout(()=>el.remove(),2600);}
+window.toast=toast;
+
+/* ---------- segmented / tabs ---------- */
+document.querySelectorAll('.viewseg,.tabs').forEach(g=>g.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  const attr=g.classList.contains('tabs')?'aria-selected':'aria-pressed';
+  g.querySelectorAll('button').forEach(x=>x.setAttribute(attr,'false'));b.setAttribute(attr,'true');
+}));
+
+/* ---------- system status footer (FR-SH-8) ---------- */
+const pct=v=>v==null?'—':Math.round(v*100)+'%';
+const tb=b=>(b/1e12).toFixed(2);
+async function loadSystem(){
+  try{
+    const s=(await j('/api/stats')).system; if(!s)return;
+    $('sysCams').textContent=`${s.cameras_online} / ${s.cameras_total}`;
+    $('sysEngine').textContent=s.engine;
+    $('sysEngine').style.color=s.engine==='running'?'var(--ok)':'var(--stale)';
+    $('sysStore').textContent=s.storage?`${tb(s.storage.used_bytes)} / ${tb(s.storage.total_bytes)} TB`:'—';
+    $('sysStoreBar').style.width=pct(s.storage?.pct);
+    $('sysCpu').textContent=pct(s.cpu_pct);   $('sysCpuBar').style.width=pct(s.cpu_pct);
+    $('sysMem').textContent=pct(s.memory_pct);$('sysMemBar').style.width=pct(s.memory_pct);
+  }catch(e){}
+}
+
+/* ---------- identity ---------- */
+async function loadUser(){
+  try{
+    const r=await j('/api/auth/status');
+    if(r.username){$('userAva').textContent=r.username.slice(0,2).toUpperCase();$('userName').textContent=r.username;}
+  }catch(e){}
+}
+
+/* ================================================================
+   M2 — cameras (FR-LV-1..6, FR-DB-1)
+   One fetch of /api/cameras drives both the dashboard strip and the
+   wall; tiles are rebuilt only when the roster changes, so the MJPEG
+   <img> connections survive a status poll.
+   ================================================================ */
+let cams=[], liveFilter='all', liveQuery='';
+
+/* A camera can be "up" and still have its stream die; without this the tile
+   shows sprawled alt text. Fall back to the same no-signal art as offline. */
+const noSignal=`<svg viewBox="0 0 320 180"><rect width="320" height="180" fill="#12151A"/>
+  <text x="160" y="94" font-size="12" fill="#6D7580" text-anchor="middle" font-family="IBM Plex Mono">no signal</text></svg>`;
+window.feedDown=img=>{if(img.dataset.down)return;img.dataset.down='1';img.outerHTML=noSignal;};
+
+const camTile=c=>c.up
+  ? `<div class="cam" data-proc="${c.paused?'off':'on'}" data-name="${esc(c.name)}">
+       <div class="feed"><img src="/video_feed?cam=${encodeURIComponent(c.name)}" alt="live feed from ${esc(c.name)}" onerror="feedDown(this)">
+         <div class="scrim"><span class="pausedtag">◼ processing paused</span></div></div>
+       <div class="bar"><span class="nm">${esc(c.name)}</span><span class="barctl">
+         <span class="live"><i></i>${c.paused?'paused':'live'}</span>
+         <button class="proc" data-cam="${esc(c.name)}" title="${c.paused?'Resume':'Pause'} processing"
+                 aria-label="${c.paused?'Resume':'Pause'} processing">${c.paused?'▶':'⏸'}</button>
+         <span class="ts">${c.last_frame_ts?new Date(c.last_frame_ts*1000).toTimeString().slice(0,8):''}</span>
+       </span></div></div>`
+  /* FR-LV-5: an offline camera gets no toggle — there is nothing to pause. */
+  : `<div class="cam offline" data-name="${esc(c.name)}">
+       <div class="feed"><svg viewBox="0 0 320 180"><rect width="320" height="180" fill="#12151A"/>
+         <text x="160" y="94" font-size="12" fill="#6D7580" text-anchor="middle" font-family="IBM Plex Mono">no signal</text></svg></div>
+       <div class="bar"><span class="nm">${esc(c.name)}</span>
+         <span class="ts" style="color:var(--stale);margin-left:auto">offline</span></div></div>`;
+
+const visible=()=>cams.filter(c=>
+  (liveFilter==='all'||(liveFilter==='online')===!!c.up) &&
+  c.name.toLowerCase().includes(liveQuery));
+
+function paint(){
+  const online=cams.filter(c=>c.up).length;
+  $('dashOnline').innerHTML=`<i></i>${online} online`;
+  $('liveOnline').innerHTML=`<i></i>${online} online`;
+  $('liveSub').textContent=cams.length
+    ? `${cams.length} cameras · ${online} online, ${cams.length-online} offline. Detections drawn in real time.`
+    : 'No cameras configured yet.';
+  $('liveFilters').querySelector('[data-f=all] .c').textContent=cams.length;
+  $('liveFilters').querySelector('[data-f=online] .c').textContent=online;
+  $('liveFilters').querySelector('[data-f=offline] .c').textContent=cams.length-online;
+
+  /* The signature deliberately excludes last_frame_ts: it changes every poll,
+     and a rebuild would tear down every MJPEG <img> and reconnect it. Only a
+     roster/up/paused change redraws; the clock is patched in place below. */
+  const sig=l=>l.map(c=>`${c.name}|${c.up}|${c.paused}`).join(',');
+  const fill=(el,list,empty)=>{
+    const s=sig(list);   // the filtered list *is* the identity — no filter key needed
+    if(el.dataset.sig!==s){
+      el.innerHTML=list.length?list.map(camTile).join('')
+        :`<p class="mono" style="color:var(--ink-3);padding:22px">${empty}</p>`;
+      el.dataset.sig=s;
+    }
+    el.querySelectorAll('.cam .ts').forEach(t=>{
+      const c=cams.find(x=>x.name===t.closest('.cam').dataset.name);
+      if(c?.up&&c.last_frame_ts) t.textContent=new Date(c.last_frame_ts*1000).toTimeString().slice(0,8);
+    });
+  };
+  fill($('wall'),visible(),'no cameras match');
+  fill($('cams'),cams.slice(0,6),'no cameras configured');
+  syncPauseAll();
+  paintCams();   // M6: same roster, same poll — the manager can't drift from the wall
+}
+
+function syncPauseAll(){
+  const anyOn=cams.some(c=>c.up&&!c.paused);
+  $('pauseAllBtn').textContent=anyOn?'⏸ Pause all':'▶ Resume all';
+}
+
+async function loadCameras(){
+  try{ cams=(await j('/api/cameras')).cameras||[]; paint(); }catch(e){}
+}
+
+async function toggleCam(name){
+  try{
+    const r=await j('/api/camera/toggle?cam='+encodeURIComponent(name),{method:'POST'});
+    const c=cams.find(x=>x.name===name); if(c)c.paused=r.paused;
+    toast(`Processing ${r.paused?'paused':'resumed'} · ${name}`);
+    paint();
+  }catch(e){ toast('Could not reach the camera'); }
+}
+
+/* delegated so rebuilt tiles keep working */
+document.addEventListener('click',e=>{
+  const b=e.target.closest('.proc'); if(b){e.stopPropagation();toggleCam(b.dataset.cam);}
+});
+$('pauseAllBtn').onclick=async()=>{
+  /* Target state: if anything is still running, the button pauses everything.
+     Fan out per camera and toggle only what disagrees — /api/camera/toggle with
+     no ?cam flips every camera blindly, resuming the already-paused (FR-LV-4). */
+  const want=cams.some(c=>c.up&&!c.paused);   // want === "should end up paused"
+  const anyOn=want;
+  await Promise.all(cams.filter(c=>c.up&&c.paused!==want)
+    .map(c=>j('/api/camera/toggle?cam='+encodeURIComponent(c.name),{method:'POST'})));
+  await loadCameras();
+  toast(anyOn?'Processing paused on all feeds':'Processing resumed on all feeds');
+};
+$('refreshFeeds').onclick=()=>{$('wall').dataset.sig='';loadCameras();toast('Feeds refreshed');};
+$('liveSearch').oninput=e=>{liveQuery=e.target.value.trim().toLowerCase();paint();};
+$('liveFilters').querySelectorAll('.chip').forEach(b=>b.onclick=()=>{
+  $('liveFilters').querySelectorAll('.chip').forEach(x=>x.setAttribute('aria-pressed','false'));
+  b.setAttribute('aria-pressed','true'); liveFilter=b.dataset.f; paint();
+});
+onEnter.live=loadCameras;
+
+/* ================================================================
+   M4 — alerts (FR-AL-1..4, FR-SH-3/6)
+   One endpoint drives the table, the chip counts, the dashboard card
+   and the two "unread" badges — so they can never disagree.
+   ================================================================ */
+let alertSev='', alertStatus='', alertQ='';
+const sevCls={high:'high',medium:'med',low:'low'};
+const sevName={high:'High',medium:'Medium',low:'Low'};
+const stCls={new:'new',acknowledged:'ack',resolved:'res'};
+const stName={new:'New',acknowledged:'Acknowledged',resolved:'Resolved'};
+const aIco={high:'▲',medium:'◆',low:'●'};
+const ruleName=r=>String(r).replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());
+const hhmm=ts=>new Date(ts*1000).toTimeString().slice(0,5);
+const badge=(el,n)=>{el.textContent=n;el.hidden=!n;};
+
+function alertRow(a){
+  /* Next status is the one action worth a click: new -> ack -> resolved.
+     ponytail: a full status dropdown can wait until someone asks to skip a step. */
+  const next=a.status==='new'?'acknowledged':a.status==='acknowledged'?'resolved':null;
+  return `<tr data-id="${esc(a.id)}" data-kf="${esc(a.keyframe||'')}" data-title="${esc(ruleName(a.rule))}"
+      data-meta="${esc(fullTime(a.timestamp)+' · '+(a.camera||'unknown camera')+' · '+a.entity)}">
+    <td class="kfcell">${kfThumb(a.keyframe)}</td>
+    <td><span class="dotcell"><span class="d ${sevCls[a.severity]||'med'}"></span>${sevName[a.severity]||esc(a.severity)}</span></td>
+    <td><b>${esc(ruleName(a.rule))}</b> <span class="mono" style="color:var(--ink-3)">${esc(a.entity)}</span></td>
+    <td class="mono">${esc(a.camera||'—')}</td><td class="mono">${esc(fullTime(a.timestamp))}</td>
+    <td><span class="status ${stCls[a.status]}">${stName[a.status]}</span></td>
+    <td class="mono" style="color:var(--unusual)">${next?`<button class="linkish" data-next="${next}">Mark ${stName[next].toLowerCase()} →</button> · `:''}<button class="linkish" data-case-add="${esc(ruleName(a.rule))}">+ Case</button></td></tr>`;
+}
+
+async function loadAlerts(){
+  const qs=new URLSearchParams();
+  if(alertSev)qs.set('severity',alertSev);
+  if(alertStatus)qs.set('status',alertStatus);
+  if(alertQ)qs.set('q',alertQ);
+  let r; try{ r=await j('/api/alerts?'+qs); }catch(e){ return; }
+  const list=r.alerts||[], c=r.counts||{};
+
+  /* unread/recent are unfiltered: the badge is a global signal, not a view of
+     whatever the filter bar happens to be showing. */
+  badge($('alertBadge'),r.unread||0); badge($('bellCount'),r.unread||0);
+  $('alertSub').textContent=(r.unread||0)
+    ? `${r.unread} unread. Triage by severity, camera or type — acknowledge or resolve.`
+    : 'Nothing unread. Triage by severity, camera or type.';
+  $('alertFilters').querySelectorAll('.chip').forEach(b=>{
+    const isSev=b.dataset.sev!==undefined;
+    const n=b.querySelector('.c'); if(n)n.textContent=c[isSev?(b.dataset.sev||'all'):b.dataset.st]??0;
+    b.setAttribute('aria-pressed',String(isSev?b.dataset.sev===alertSev:b.dataset.st===alertStatus));
+  });
+
+  $('alertRows').innerHTML=list.length?list.map(alertRow).join('')
+    :`<tr><td colspan="7" class="mono" style="color:var(--ink-3);padding:22px">no alerts match</td></tr>`;
+  /* Dashboard card rides the same fetch — top 5 newest, filter-independent. */
+  const recent=r.recent||[];
+  $('dashAlerts').innerHTML=recent.length?recent.map(a=>
+    `<div class="alert" data-id="${esc(a.id)}"><span class="ic ${sevCls[a.severity]||'med'}">${aIco[a.severity]||'◆'}</span>
+       <div class="t"><p>${esc(ruleName(a.rule))}</p><div class="m">${esc(a.camera||'—')} · ${esc(a.entity)}</div></div>
+       <div class="side"><div class="tm">${hhmm(a.timestamp)}</div><span class="sev ${sevCls[a.severity]||'med'}">${sevCls[a.severity]||'med'}</span></div></div>`
+    ).join('')
+    :`<p class="mono" style="color:var(--ink-3);padding:22px">no alerts yet</p>`;
+}
+
+const setStatus=(id,status,extra)=>j('/api/alerts/'+encodeURIComponent(id)+'/status',
+  {method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({status,...extra})}).then(loadAlerts);
+
+document.addEventListener('click',e=>{
+  const b=e.target.closest('#alertRows [data-next]');
+  if(b){ setStatus(b.closest('tr').dataset.id,b.dataset.next); return; }
+  if(e.target.closest('#dashAlerts .alert')) return go('alerts');
+  /* the thumbnail is the way in to the evidence — same dialog the timeline uses,
+     so "+ Add to case" works from an alert too */
+  const tr=e.target.closest('#alertRows tr[data-title]');
+  if(tr&&!e.target.closest('button'))
+    return openKf(tr.dataset.title,tr.dataset.meta,tr.dataset.kf,tr.dataset.id,'alert');
+  /* a 32px thumb is a hint, not evidence — clicking one blows it up. Stacks on
+     top of the still-open profile; Esc peels back one dialog at a time. */
+  const kv=e.target.closest('#entBody .kv[data-kf]');
+  if(kv&&kv.dataset.kf)
+    openKf(kv.querySelector('span').textContent.trim(),kv.dataset.when,kv.dataset.kf,'','event');
+});
+$('markAllRead').onclick=()=>setStatus('all','acknowledged',{all:true}).then(()=>toast('Marked all read'));
+$('alertSearch').oninput=e=>{alertQ=e.target.value.trim();loadAlerts();};
+$('alertFilters').querySelectorAll('.chip').forEach(b=>b.onclick=()=>{
+  /* clicking the active chip clears it — the All chip is just severity='' */
+  if(b.dataset.sev!==undefined) alertSev=alertSev===b.dataset.sev?'':b.dataset.sev;
+  else alertStatus=alertStatus===b.dataset.st?'':b.dataset.st;
+  loadAlerts();
+});
+onEnter.alerts=loadAlerts;
+
+/* ================================================================
+   V4-M3 — Timeline. Event class (fired/unusual/routine) is decided
+   server-side and drives colour in the list, the histogram and the
+   dashboard card alike.
+   ================================================================ */
+let tlHours=24, tlType='';
+const clsIco={fired:'▲',unusual:'◆',routine:'●'};
+const clsCell={fired:'f',unusual:'u',routine:''};
+const evTitle=e=>e.rule
+  ? `Rule fired — ${ruleName(e.rule)}`
+  : `${e.entity} · ${String(e.predicate).replace(/_/g,' ')}`;
+
+const fullTime=ts=>new Date(ts*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+/* retention prunes keyframes out from under old records — a dead <img> removes
+   itself rather than leaving a broken-image box in the evidence list */
+const kfThumb=(k,cls='')=>k
+  ?`<img class="kft ${cls}" src="/keyframe/${encodeURIComponent(k)}" alt="" loading="lazy" onerror="this.remove()">`:'';
+
+function tlRow(e){
+  const kf=e.keyframe?`<img class="thumb" src="/keyframe/${encodeURIComponent(e.keyframe)}" alt="" loading="lazy">`:'';
+  return `<li data-oid="${esc(e.id)}" data-kind="${e.rule?'alert':'event'}" data-kf="${esc(e.keyframe||'')}" data-title="${esc(evTitle(e))}" data-meta="${esc(fullTime(e.timestamp)+' · '+(e.camera||'unknown camera'))}">
+    <span class="tm">${hhmm(e.timestamp)}</span>
+    <span class="ic ${clsCell[e.class]}">${clsIco[e.class]}</span>
+    <span class="bd"><p>${esc(evTitle(e))}</p><span>${esc(e.camera||'—')} · ${e.class}</span></span>${kf}</li>`;
+}
+
+async function loadTimeline(){
+  const until=Date.now()/1000, since=until-tlHours*3600;
+  const qs=new URLSearchParams({since,until,bins:48});
+  if(tlType)qs.set('type',tlType);
+  let r; try{ r=await j('/api/observations?'+qs); }catch(e){ return; }
+  const ev=r.events||[], b=r.buckets||[], c=r.counts||{};
+  const peak=Math.max(1,...b.map(x=>x.fired+x.unusual+x.routine));
+  /* one bar per bucket; its colour is the most-severe class it contains, because a
+     fired event must never be hidden by the routine traffic around it */
+  $('tlhisto').innerHTML=b.map(x=>{
+    const n=x.fired+x.unusual+x.routine;
+    const k=x.fired?'f':x.unusual?'u':'';
+    return `<span class="bar ${k}" style="height:${Math.round(n/peak*100)}%" title="${n} events"></span>`;
+  }).join('');
+  /* past a day, clock times alone are ambiguous — the axis has to name the day */
+  const ax=until-since>26*3600
+    ?ts=>new Date(ts*1000).toLocaleDateString([],{month:'short',day:'numeric'}):hhmm;
+  $('tlAxis').innerHTML=[0,.25,.5,.75].map(f=>`<span>${ax(since+(until-since)*f)}</span>`).join('')+'<span>now</span>';
+  $('tlRng').textContent=`${fullTime(since)} → now · ${ev.length} events`;
+  $('tlFilters').querySelectorAll('.chip').forEach(btn=>{
+    const n=btn.querySelector('.c'); if(n)n.textContent=c[btn.dataset.t||'all']??0;
+    btn.setAttribute('aria-pressed',String(btn.dataset.t===tlType));
+  });
+  const newest=[...ev].reverse();
+  $('tlfull').innerHTML=newest.length?newest.map(tlRow).join('')
+    :`<li class="mono" style="color:var(--ink-3);padding:22px">no events in this window</li>`;
+  /* Dashboard card rides the same fetch but reads the server's pre-filter list —
+     filtering the timeline pane must not silently narrow an unrelated card. */
+  const recent=r.recent||[];
+  $('dashTimeline').innerHTML=recent.length?recent.map(tlRow).join('')
+    :`<li class="mono" style="color:var(--ink-3);padding:22px">no events yet</li>`;
+}
+
+$('tlRange').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  tlHours=+b.dataset.h;
+  $('tlRange').querySelectorAll('button').forEach(o=>o.setAttribute('aria-pressed',String(o===b)));
+  loadTimeline();
+});
+$('tlFilters').querySelectorAll('.chip').forEach(b=>b.onclick=()=>{
+  tlType=tlType===b.dataset.t?'':b.dataset.t; loadTimeline();
+});
+/* M8: the dialog is the event's detail view, not just a picture — an event
+   with no keyframe still has to be openable to be attachable to a case.
+   Alerts, case items and entity observations open the same one: one incident,
+   one evidence view. */
+function openKf(title,meta,kf,oid,kind){
+  $('kfTitle').textContent=title;
+  $('kfMeta').textContent=meta;
+  $('kfImg').hidden=!kf;
+  if(kf)$('kfImg').src='/keyframe/'+encodeURIComponent(kf);
+  $('kfDlg').dataset.oid=oid||'';
+  $('kfDlg').dataset.kind=kind||'event';
+  $('kfDlg').showModal();
+}
+document.addEventListener('click',e=>{
+  const li=e.target.closest('#tlfull li, #dashTimeline li');
+  if(!li||!li.dataset.title)return;
+  openKf(li.dataset.title,li.dataset.meta,li.dataset.kf,li.dataset.oid,li.dataset.kind);
+});
+onEnter.timeline=loadTimeline;
+
+/* ================================================================
+   V4-M5 — Entities + Assistant.
+   /api/entities already carries times_seen / last_seen / keyframe /
+   frequency, so the grid, the chip counts and the dashboard card are
+   one fetch with no client-side aggregation. Filtering is client-side
+   on purpose: the whole roster is a few hundred rows, and a round trip
+   per keystroke would be slower than the search itself.
+   ================================================================ */
+let ents=[], entTab='person', dashEntTab='person', entQ='';
+const freqName={high:'High',med:'Medium',low:'Low'};
+const typeName={person:'Person',object:'Object'};
+const entName=e=>e.label||`${typeName[e.type]||e.type} ${String(e.id).slice(-6)}`;
+const ago=ts=>{
+  if(!ts)return 'never seen';
+  const m=(Date.now()/1000-ts)/60;
+  return m<1?'just now':m<60?`${Math.round(m)}m ago`
+    :m<1440?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
+};
+const noPic=`<svg class="pic" viewBox="0 0 320 180"><rect width="320" height="180" fill="#12151A"/>
+  <text x="160" y="96" font-size="12" fill="#6D7580" text-anchor="middle" font-family="IBM Plex Mono">no keyframe</text></svg>`;
+const entPic=e=>e.keyframe
+  ?`<img class="pic" src="/keyframe/${encodeURIComponent(e.keyframe)}" alt="" loading="lazy">`
+  :noPic;
+
+const entCard=e=>`<div class="ecard" data-ent="${esc(e.id)}">${entPic(e)}<div class="b">
+  <p>${esc(entName(e))}</p><span>${e.times_seen} sightings · last ${ago(e.last_seen)}</span>
+  <div class="tags"><span class="mono" style="color:var(--ink-3)">${esc(e.type)}</span>
+  <span class="freq ${e.frequency}" style="margin-left:auto">${freqName[e.frequency]}</span></div></div></div>`;
+
+const entRow=e=>`<div class="entity" data-ent="${esc(e.id)}">${entPic(e)}
+  <div class="t"><p>${esc(entName(e))}</p><span>last ${ago(e.last_seen)}</span></div>
+  <div class="meta"><div class="v">${e.times_seen}×</div>
+  <span class="freq ${e.frequency}">${freqName[e.frequency]}</span></div></div>`;
+
+/* VLM states are paragraph-length sentences — a one-line card shows a taste */
+const shorten=(a,n=2,len=64)=>a.slice(0,n).map(s=>s.length>len?s.slice(0,len)+'…':s).join(' · ')
+  +(a.length>n?` +${a.length-n} more`:'');
+const empty=m=>`<p class="mono" style="color:var(--ink-3);padding:22px">${m}</p>`;
+/* most-seen first — a roster sorted by creation time buries whoever matters */
+const bySeen=(a,b)=>b.times_seen-a.times_seen;
+
+function renderEnts(){
+  const of=t=>ents.filter(e=>e.type===t);
+  $('entFilters').querySelectorAll('.chip').forEach(b=>{
+    b.querySelector('.c').textContent=of(b.dataset.etab).length;
+    b.setAttribute('aria-pressed',String(b.dataset.etab===entTab));
+  });
+  const list=of(entTab)
+    .filter(e=>entName(e).toLowerCase().includes(entQ)||String(e.id).includes(entQ))
+    .sort(bySeen);
+  $('entSub').textContent=ents.length
+    ?`${ents.length} entities remembered · ${of('person').length} people, ${of('object').length} objects.`
+    :'Nothing remembered yet.';
+  $('entGrid').innerHTML=list.length?list.map(entCard).join('')
+    :empty(ents.length?'no entities match':'no entities yet');
+  const top=of(dashEntTab).sort(bySeen).slice(0,4);
+  $('dashEntities').innerHTML=top.length?top.map(entRow).join('')
+    :empty('no entities yet');
+}
+
+async function loadEntities(){
+  try{ ents=await j('/api/entities'); }catch(e){ return; }
+  renderEnts();
+}
+
+$('entSearch').oninput=e=>{entQ=e.target.value.trim().toLowerCase();renderEnts();};
+$('entRefresh').onclick=()=>loadEntities();
+$('entFilters').querySelectorAll('.chip').forEach(b=>b.onclick=()=>{entTab=b.dataset.etab;renderEnts();});
+$('dashEntTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{dashEntTab=b.dataset.etab;renderEnts();});
+onEnter.entities=loadEntities;
+
+/* ---------- entity profile (reuses /api/entity/<id> + name/merge) ---------- */
+let entOpen=null;
+const edgeLine=r=>`<div class="kv ${r.status==='candidate'?'cand':''}">
+  <span>${esc(String(r.predicate).replace(/_/g,' '))}${r.object?' → '+esc(r.object):''}${r.location?' @ '+esc(r.location):''}</span>
+  <span>${r.weight}${r.status==='candidate'?' · candidate':''}</span></div>`;
+
+async function openEntity(id){
+  let d; try{ d=await j('/api/entity/'+encodeURIComponent(id)); }catch(e){ toast('Entity not found'); return; }
+  entOpen=d;
+  $('entTitle').textContent=d.label;
+  $('entMeta').textContent=`${d.type} · ${d.id} · seen ${d.times_seen}× · last ${ago(d.last_seen)}`;
+  const sec=(t,rows)=>rows.length?`<p class="sec">${t}</p>${rows.join('')}`:'';
+  $('entBody').innerHTML=
+    sec('Relations',d.relations.map(edgeLine))+
+    sec('Habits',d.habits.map(edgeLine))+
+    sec('Events',d.events.map(edgeLine))+
+    sec('Recent observations',d.recent_observations.slice(0,8).map(o=>
+      `<div class="kv" data-kf="${esc(o.keyframe||'')}" data-when="${esc(fullTime(o.timestamp)+' · '+o.origin)}"><span style="display:flex;align-items:center;gap:9px">${kfThumb(o.keyframe,'s')}${esc(String(o.predicate).replace(/_/g,' '))}</span>
+        <span>${fullTime(o.timestamp)} · ${esc(o.origin)}</span></div>`))
+    ||empty('nothing recorded about this entity yet');
+  $('entRename').value='';
+  /* merging across types would be a data error, not a correction */
+  $('entMergeTarget').innerHTML=ents.filter(e=>e.type===d.type&&e.id!==d.id)
+    .map(e=>`<option value="${esc(e.id)}">${esc(entName(e))}</option>`).join('')
+    ||`<option value="">no other ${esc(d.type)}s</option>`;
+  $('entDlg').showModal();
+}
+
+const entPost=(path,body)=>j('/api/entity/'+encodeURIComponent(entOpen.id)+path,
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+
+$('entRenameGo').onclick=async()=>{
+  const label=$('entRename').value.trim();
+  if(!label){toast('Type a new name first');return;}
+  try{ await entPost('/name',{label}); }catch(e){ toast('Rename failed'); return; }
+  toast('Renamed to '+label); $('entDlg').close(); await loadEntities();
+};
+$('entMergeGo').onclick=async()=>{
+  const target=$('entMergeTarget').value;
+  if(!target){toast('Nothing to merge into');return;}
+  try{ await entPost('/merge',{target}); }catch(e){ toast('Merge failed'); return; }
+  toast('Merged'); $('entDlg').close(); await loadEntities();
+};
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-ent]');
+  if(el)openEntity(el.dataset.ent);
+});
+/* FR-NG-6: pane switch, not a page load — the profile stays as you left it */
+$('entGraph').onclick=()=>{const id=entOpen?.id; if(id)go('graph',{entity:id});};
+
+/* ================================================================
+   Assistant — /api/ask returns aggregated evidence + the query it ran.
+   Every claim is rendered from that payload; nothing is written here,
+   so the answer and its trace can never drift apart.
+   ================================================================ */
+function askBubble(r){
+  if(r.error)return `<div class="msg bot" style="max-width:100%"><p class="lead">Could not run that query.</p>
+    <p class="mono" style="color:var(--stale)">${esc(r.error)}</p></div>`;
+  const list=r.entities||[];
+  const count=list.length
+    ?`${list.length} ${list.length===1?'entity':'entities'} · ${r.total_observations} observations matched.`
+    :'Nothing in memory matches that question.';
+  // grounded prose leads when the model wrote one; the count becomes the sub-line.
+  // r.answer is derived only from the evidence below, so the two can't disagree.
+  const lead=r.answer
+    ?`<p class="lead">${esc(r.answer)}</p><p class="mono" style="color:var(--ink-3);margin-top:4px">${count}</p>`
+    :`<p class="lead">${count}</p>`;
+  const rows=list.map(e=>`<div class="entity" data-ent="${esc(e.entity_id)}">
+    <div class="t"><p>${esc(e.label)}</p><span>${e.n_observations} obs · ${fullTime(e.first_seen)} → ${fullTime(e.last_seen)}${
+      e.states.length?' · '+esc(shorten(e.states)):''}</span></div>
+    <div class="meta"><div class="v">${Math.round(e.duration_s)}s</div></div></div>`).join('');
+  const kfs=list.flatMap(e=>e.keyframes||[]).slice(0,8);
+  const chips=kfs.length?`<div class="evchips">${kfs.map(k=>{
+    const name=k.split('/').pop();
+    return `<span class="evchip" data-kf="${esc(name)}"><img src="${esc(k)}" alt=""><span class="mono">${esc(name.slice(0,12))}</span></span>`;
+  }).join('')}</div>`:'';
+  const fired=list.flatMap(e=>e.rule_events||[]);
+  const trace=`<details class="trace"><summary>Show retrieved subgraph and query trace</summary><pre>${
+    esc(JSON.stringify(r.query,null,2))}
+
+→ ${list.length} entities · ${r.total_observations} observations · ${kfs.length} keyframes
+→ ${fired.length} rule events in range
+→ every figure above is a row count, not generated text</pre></details>`;
+  return `<div class="msg bot" style="max-width:100%">${lead}${rows}${chips}${trace}</div>`;
+}
+
+// the conversation so far — sent with each turn so follow-ups ('what about
+// yesterday?', 'and her?') resolve against what was already asked and answered.
+const askTurns=[];
+async function runAsk(q){
+  if(!q)return;
+  const log=$('askLog');
+  log.insertAdjacentHTML('beforeend',
+    `<div class="msg me">${esc(q)}<span class="tm">${hhmm(Date.now()/1000)}</span></div>`);
+  const wait=document.createElement('div');
+  wait.className='msg bot'; wait.textContent='Searching memory…';
+  log.appendChild(wait); wait.scrollIntoView({block:'nearest'});
+  let r; try{
+    r=await j('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+                          body:JSON.stringify({question:q,history:askTurns.slice(-6)})});
+  }catch(e){ r={error:'the assistant is unreachable'}; }
+  wait.outerHTML=askBubble(r);
+  // remember the turn (the prose if we got one, else the count) for the next follow-up
+  if(!r.error){
+    const a=r.answer||(r.entities?`${r.entities.length} entities · ${r.total_observations} observations matched.`:'');
+    askTurns.push({q,a});
+  }
+  log.lastElementChild.scrollIntoView({block:'nearest'});
+}
+
+const askGo=()=>{const i=$('askInput');const q=i.value.trim();i.value='';runAsk(q);};
+$('askSend').onclick=askGo;
+$('askInput').onkeydown=e=>{if(e.key==='Enter')askGo();};
+$('askSuggest').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  go('assistant'); runAsk(b.textContent.trim());
+});
+/* the dashboard composer is a doorway, not a second chat — one log, one history */
+const dashAskGo=()=>{
+  const i=$('dashAskInput');const q=i.value.trim();i.value='';
+  if(!q)return; go('assistant'); runAsk(q);
+};
+$('dashAskSend').onclick=dashAskGo;
+$('dashAskInput').onkeydown=e=>{if(e.key==='Enter')dashAskGo();};
+$('dashAsk').innerHTML=`<p class="mono" style="color:var(--ink-3);padding:6px 2px">
+  Ask anything the cameras saw — answers open in the assistant, with the keyframes behind them.</p>`;
+
+/* keyframe chips in an answer open the same viewer the timeline uses */
+document.addEventListener('click',e=>{
+  const c=e.target.closest('.evchip[data-kf]'); if(!c)return;
+  $('kfTitle').textContent='Evidence keyframe';
+  $('kfMeta').textContent=c.dataset.kf;
+  $('kfImg').src='/keyframe/'+encodeURIComponent(c.dataset.kf);
+  $('kfDlg').showModal();
+});
+
+/* ================================================================
+   V4-M5b — Network graph, in the shell (FR-NG-1..8, FR-SH-2a).
+   `vis` is a global from the vendor <script>. One pair of DataSets
+   feeds both the pane canvas and the dashboard card, so the two can
+   never disagree about what the graph contains.
+   Node shape/colour live here, not on the server: they are read off
+   the theme's CSS vars, which is why the theme toggle just re-applies
+   the options and dark mode costs nothing.
+   ================================================================ */
+const gNodes=new vis.DataSet([]), gEdges=new vis.DataSet([]);
+let gNet=null, gMini=null, gLoaded=false, gSettled=false;
+
+const cssv=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const gGroups=()=>({
+  person:{shape:'circle',color:{background:cssv('--unusual-bg'),border:cssv('--unusual'),
+    highlight:{background:cssv('--unusual-bg'),border:cssv('--fired')}},font:{color:cssv('--unusual')}},
+  object:{shape:'box',color:{background:cssv('--card-2'),border:cssv('--ink-3'),
+    highlight:{background:cssv('--card-2'),border:cssv('--fired')}},font:{color:cssv('--ink')}},
+  location:{shape:'box',color:{background:cssv('--stale-bg'),border:cssv('--stale'),
+    highlight:{background:cssv('--stale-bg'),border:cssv('--fired')}},font:{color:cssv('--stale')}},
+});
+const gOpts=()=>({
+  nodes:{borderWidth:1.6,shadow:false,shapeProperties:{borderRadius:6},
+    font:{multi:'html',face:'Space Grotesk',size:13,
+          mono:{face:'IBM Plex Mono',size:9.5,color:cssv('--ink-3')}}},
+  groups:gGroups(),
+  edges:{width:1.2,smooth:false,color:{color:cssv('--rule-2'),highlight:cssv('--fired')},
+    /* knockout so a label stays readable where it crosses its own line */
+    font:{size:10,face:'IBM Plex Mono',color:cssv('--ink-3'),align:'top',
+          strokeWidth:3,strokeColor:cssv('--paper')}},
+  /* stabilization.fit is vis's own post-layout fit — calling fit() ourselves
+     races the physics loop and lands on half-settled coordinates */
+  physics:{barnesHut:{gravitationalConstant:-3200,centralGravity:.3,springLength:150},
+           stabilization:{enabled:true,iterations:400,fit:true}},
+  /* pathfinding highlights only the path edges; don't let vis also light up
+     every edge touching a selected node (would blur a multi-hop trace). */
+  interaction:{selectConnectedEdges:false,hoverConnectedEdges:false},
+});
+
+/* label line 2 is the type; sizing is by appearance count, joined off the
+   entity roster M5 already loaded — no extra endpoint for one integer. */
+function gStyle(n){
+  const e=ents.find(x=>x.id===n.id);
+  const seen=e?e.times_seen:0;
+  const sub=n.group==='location'?'zone':n.group;
+  /* log scale: sightings span 1..400+, so linear would peg everything to the cap */
+  return {id:n.id,label:`${n.label}\n<code>${sub}</code>`,
+          widthConstraint:{minimum:Math.round(30+Math.log2(1+seen)*9)},
+          title:seen?`${seen} sightings`:undefined};
+}
+
+function gCount(){
+  $('gCounts').textContent=`${gNodes.length} nodes · ${gEdges.length} edges · all time`;
+}
+
+async function loadGraph(){
+  let g; try{ g=await j('/api/graph'); }catch(e){ return; }
+  const styled=g.nodes.map(n=>({...n,...gStyle(n)}));
+  gNodes.update(styled);
+  gEdges.update(g.edges);
+  gCount(); gLoaded=true;
+  if(!gMini){
+    /* the dashboard card is the same graph, not a picture of one */
+    gMini=new vis.Network($('gmini'),{nodes:gNodes,edges:gEdges},
+      {...gOpts(),interaction:{dragNodes:false,dragView:false,zoomView:false,selectable:false}});
+    gMini.on('stabilizationIterationsDone',()=>gMini.setOptions({physics:false}));
+  }
+}
+
+function ensureNet(){
+  if(gNet)return;
+  gNet=new vis.Network($('gcanvas'),{nodes:gNodes,edges:gEdges},gOpts());
+  $('gcanvas').appendChild(ctxm);   // the constructor empties the container
+  /* FR-NG-8: settle once, then hold still — clicking must not re-shuffle.
+     fit() belongs here too: before stabilisation the layout is still moving. */
+  gNet.on('stabilizationIterationsDone',()=>{gSettled=true;gNet.setOptions({physics:false});});
+  gNet.on('click',p=>{
+    hideCtx();
+    if(!p.nodes.length){return;}
+    const id=p.nodes[0];
+    if(p.event.srcEvent.shiftKey)return shiftPath(id);
+    showInspect(id);
+  });
+  gNet.on('oncontext',p=>{
+    p.event.preventDefault();
+    const id=gNet.getNodeAt(p.pointer.DOM);
+    if(!id)return hideCtx();
+    showCtx(p.pointer.DOM,id);
+  });
+}
+
+/* data first, then the network: a Network built empty stabilises instantly,
+   turns its own physics off, and every node added afterwards lands unplaced. */
+onEnter.graph=async(extra)=>{
+  if(!gLoaded)await loadGraph();
+  ensureNet();
+  gNet.redraw();          /* the pane may have been display:none until now */
+  if(extra?.entity)focusEntity(extra.entity);
+};
+
+/* the only thing allowed to move the layout (FR-NG-8) */
+function relayout(){
+  gSettled=false;
+  gNet.setOptions({physics:true});
+  gNet.stabilize();
+}
+/* the card is built while the dashboard may be hidden, and a 0x0 canvas fits to
+   nothing — re-measure whenever the element actually gets a size */
+new ResizeObserver(()=>{ if(!gMini)return; gMini.setSize('100%','100%'); gMini.fit(); })
+  .observe($('gmini'));
+$('gRefresh').onclick=async()=>{gLoaded=false;await loadGraph();relayout();};
+$('gRelayout').onclick=relayout;
+addEventListener('themechange',()=>{
+  gNet?.setOptions(gOpts());
+  gMini?.setOptions({...gOpts(),physics:false});
+});
+
+/* deep link (FR-NG-6): pane switch only, never a page load */
+async function focusEntity(id){
+  if(!gNodes.get(id))await loadGraph();
+  if(!gNodes.get(id)){toast('That entity has no edges in the graph yet');return;}
+  /* fit-on-stabilise would otherwise yank the view back off the target */
+  if(!gSettled)return void gNet.once('stabilizationIterationsDone',()=>focusEntity(id));
+  gNet.selectNodes([id]);
+  gNet.focus(id,{scale:1.1,animation:{duration:500}});
+  showInspect(id);
+}
+
+/* ---------- context menu: expand + path (link-analysis gestures) ---------- */
+const ctxm=document.createElement('div');
+ctxm.className='ctxm'; ctxm.hidden=true;
+document.addEventListener('click',hideCtx);
+function hideCtx(){ctxm.hidden=true;}
+
+let pathStart=null;
+function showCtx(pos,id){
+  const items=[['expand','Expand connections']];
+  items.push(pathStart&&pathStart!==id?['pathTo','Trace path to here']
+    :pathStart===id?['pathCancel','Cancel path start']:['pathFrom','Trace path from here…']);
+  ctxm.innerHTML=`<div class="hd">${esc(String((gNodes.get(id)||{}).label||id).split('\n')[0])}</div>`
+    +items.map(([a,t])=>`<button data-a="${a}">${t}</button>`).join('');
+  ctxm.querySelectorAll('button').forEach(b=>b.onclick=e=>{
+    e.stopPropagation(); hideCtx();
+    const a=b.dataset.a;
+    if(a==='expand')expandNode(id);
+    else if(a==='pathFrom'){pathStart=id;banner('Path start set — shift-click or right-click the other node.');}
+    else if(a==='pathCancel'){pathStart=null;hideBanner();}
+    else tracePath(pathStart,id),pathStart=null;
+  });
+  ctxm.style.left=pos.x+'px'; ctxm.style.top=pos.y+'px'; ctxm.hidden=false;
+}
+
+/* shift-click is the same gesture without the menu (FR-NG-3) */
+function shiftPath(id){
+  if(!pathStart||pathStart===id){pathStart=id;banner('Path start set — shift-click the other node.');return;}
+  tracePath(pathStart,id); pathStart=null;
+}
+
+/* Transform: pull this entity's relations (incl. hidden candidates) onto the canvas. */
+async function expandNode(id){
+  if(!String(id).startsWith('ent_'))return;   // locations have no history to expand
+  let g; try{ g=await j('/api/entity/'+encodeURIComponent(id)+'/expand'); }catch(e){ return; }
+  gNodes.update(g.nodes.map(n=>({...n,...gStyle(n)})));
+  gEdges.update(g.edges);
+  /* the new neighbours have no coordinates yet — settle them in */
+  gCount(); relayout(); gNet.selectNodes([id]);
+}
+
+/* Pathfinding: undirected BFS over the loaded graph -> highlight the chain. */
+function tracePath(a,b){
+  const adj={};
+  gEdges.get().forEach(e=>{
+    (adj[e.from]=adj[e.from]||[]).push({to:e.to,id:e.id});
+    (adj[e.to]=adj[e.to]||[]).push({to:e.from,id:e.id});
+  });
+  const prev={},seen=new Set([a]),q=[a];
+  while(q.length){
+    const cur=q.shift();
+    if(cur===b)break;
+    (adj[cur]||[]).forEach(nb=>{
+      if(!seen.has(nb.to)){seen.add(nb.to);prev[nb.to]={node:cur,edge:nb.id};q.push(nb.to);}
+    });
+  }
+  if(a!==b&&!(b in prev)){gNet.unselectAll();banner('No path between these two.');return;}
+  const pn=[b],pe=[]; let cur=b;
+  while(cur!==a){const p=prev[cur];pe.push(p.edge);pn.push(p.node);cur=p.node;}
+  gNet.setSelection({nodes:pn,edges:pe});
+  const nm=i=>String((gNodes.get(i)||{}).label||i).split('\n')[0];
+  banner(`${esc(nm(a))} → ${esc(nm(b))} · ${pe.length} hop(s)`,true);
+}
+
+let gBanner=null;
+function banner(html,clearable){
+  if(!gBanner){gBanner=document.createElement('div');gBanner.className='gbanner';$('gcanvas').appendChild(gBanner);}
+  gBanner.innerHTML=`<span>${html}</span>`+(clearable?'<button>clear</button>':'');
+  const c=gBanner.querySelector('button');
+  if(c)c.onclick=()=>{gNet.unselectAll();hideBanner();};
+  gBanner.hidden=false;
+}
+function hideBanner(){if(gBanner)gBanner.hidden=true;}
+
+/* ---------- inspector (FR-NG-4) ---------- */
+let gSelId=null;
+const gRow=(l,v,c)=>`<div class="row2"><span>${l}</span><span class="mono"${c?` style="color:${c}"`:''}>${v}</span></div>`;
+/* every belief is clickable: the evidence behind it is one endpoint away */
+const gEdgeRow=r=>`<div class="row2 link ${r.status==='candidate'?'cand':''}" data-rid="${esc(r.id)}"
+   title="Why does the system believe this?"><span>${esc(String(r.predicate).replace(/_/g,' '))}${
+   r.object?' → '+esc(r.object):''}${r.location?' @ '+esc(r.location):''}</span>
+  <span class="mono">${r.weight}</span><button class="kill" data-kill="${esc(r.id)}" title="This belief is wrong">×</button></div>`;
+
+async function showInspect(id){
+  gSelId=id;
+  if(!String(id).startsWith('ent_')){
+    $('gSelTitle').textContent='Selected · zone';
+    $('gSel').innerHTML=gRow('Zone',esc(id))+gRow('Edges',gEdges.get().filter(e=>e.from===id||e.to===id).length);
+    return;
+  }
+  let d; try{ d=await j('/api/entity/'+encodeURIComponent(id)); }catch(e){ return; }
+  $('gSelTitle').textContent='Selected · '+d.label;
+  const zones=new Set(d.habits.filter(h=>h.location).map(h=>h.location));
+  const sec=(t,rows)=>rows.length?`<h3 style="border-top:1px solid var(--rule)">${t}</h3>`+rows.join(''):'';
+  $('gSel').innerHTML=
+    gRow('Appearances',d.times_seen)+
+    gRow('Zones visited',zones.size)+
+    gRow('Relations',d.relations.length)+
+    gRow('Alerts',d.events.length+(d.events.length?' open':''),d.events.length?'var(--fired)':null)+
+    sec('Relations',d.relations.map(gEdgeRow))+
+    sec('Habits',d.habits.map(gEdgeRow))+
+    sec('Alerts',d.events.map(gEdgeRow))+
+    `<div style="padding:12px 14px;border-top:1px solid var(--rule)">
+       <button class="btn btn-s" data-ent="${esc(d.id)}">Open full profile</button></div>`;
+}
+
+$('gSide').addEventListener('click',async e=>{
+  const kill=e.target.closest('[data-kill]');
+  if(kill){
+    try{ await fetch('/api/relation/'+encodeURIComponent(kill.dataset.kill)+'/suppress',{method:'POST'}); }
+    catch(err){ toast('Could not remove that belief'); return; }
+    toast('Belief removed'); gLoaded=false; await loadGraph(); showInspect(gSelId); return;
+  }
+  const row=e.target.closest('[data-rid]');
+  if(row)showEvidence(row.dataset.rid);
+});
+
+/* provenance: the observations + keyframes behind one belief */
+async function showEvidence(rid){
+  let e; try{ e=await j('/api/relation/'+encodeURIComponent(rid)+'/evidence'); }catch(err){ return; }
+  const imgs=(e.keyframes||[]).map(k=>`<img src="${esc(k)}" loading="lazy" onerror="this.remove()">`).join('');
+  const obs=(e.observations||[]).map(o=>gRow(esc(String(o.predicate).replace(/_/g,' ')),fullTime(o.timestamp))).join('');
+  $('gSelTitle').textContent='Why · '+e.predicate;
+  $('gSel').innerHTML=gRow('Status',esc(e.status))+gRow('Weight',e.weight)+
+    gRow('Supporting observations',e.evidence_count)+
+    (imgs?`<h3 style="border-top:1px solid var(--rule)">Keyframes</h3><div class="kfg">${imgs}</div>`:'')+
+    (obs?`<h3 style="border-top:1px solid var(--rule)">Observations</h3>${obs}`:'')+
+    `<div style="padding:12px 14px;border-top:1px solid var(--rule)">
+       <button class="btn btn-s" id="gEvBack">← back</button></div>`;
+  $('gEvBack').onclick=()=>showInspect(gSelId);
+}
+
+/* ================================================================
+   M6 — camera manager (FR-CM-1,2,4)
+   Rides the M2 poll: `cams` is already refreshed every 10s, so the
+   table cannot disagree with the wall.
+   ================================================================ */
+const camStatus=c=>c.up?'<span class="pill up">up</span>'
+  :c.running?'<span class="pill down">no signal</span>'
+  :'<span class="pill down">on next restart</span>';
+
+function paintCams(){
+  $('camSub').textContent=cams.length
+    ? `${cams.length} configured · ${cams.filter(c=>c.up).length} up.`
+    : 'No cameras configured yet — add one on the right.';
+  $('camRows').innerHTML=cams.length?cams.map(c=>`<tr>
+      <td><b>${esc(c.name)}</b>${c.paused?' <span class="mono" style="color:var(--stale)">paused</span>':''}</td>
+      <td class="mono" style="color:var(--ink-3)">${esc(c.source??'—')}</td>
+      <td class="mono" style="color:var(--ink-3)">${c.zones.length?esc(c.zones.join(', ')):'whole view'}</td>
+      <td>${camStatus(c)}</td>
+      <td style="text-align:right"><button class="btn btn-s" data-camrm="${esc(c.name)}">Remove</button></td>
+    </tr>`).join('')
+    :`<tr><td colspan="5" class="mono" style="color:var(--ink-3);padding:22px">no cameras configured</td></tr>`;
+
+  /* the zone editor draws on a live still, so only running cameras qualify */
+  const live=cams.filter(c=>c.up), sel=$('zcam'), keep=sel.value;
+  sel.innerHTML=live.length?live.map(c=>`<option>${esc(c.name)}</option>`).join('')
+    :'<option value="">— no camera is sending frames —</option>';
+  sel.value=live.some(c=>c.name===keep)?keep:(live[0]?.name||'');
+  if(sel.value!==keep)loadShot();
+}
+
+function loadShot(){
+  const cam=$('zcam').value;
+  zpts=[]; drawZone();
+  $('zshot').src=cam?`/snapshot?cam=${encodeURIComponent(cam)}&t=${Date.now()}`:'';
+}
+$('zcam').onchange=loadShot;
+
+let zpts=[];
+function drawZone(){
+  $('zsvg').innerHTML=zpts.map(([x,y],i)=>
+      `<circle cx="${x}" cy="${y}" r="3.5" fill="var(--unusual)"/>`).join('')
+    +(zpts.length>1?`<polygon points="${zpts.map(p=>p.join(',')).join(' ')}"
+        fill="rgba(37,84,143,.18)" stroke="var(--unusual)" stroke-width="1.5"/>`:'');
+  $('zcount').textContent=zpts.length?`${zpts.length} points`:'';
+}
+/* SVG coords track the displayed image; frame coords are what the pipeline
+   uses, so the two only meet at save time via naturalWidth. */
+$('zsvg').onclick=e=>{
+  const r=e.currentTarget.getBoundingClientRect();
+  zpts.push([+(e.clientX-r.left).toFixed(1),+(e.clientY-r.top).toFixed(1)]);
+  drawZone();
+};
+$('zsvg').setAttribute('preserveAspectRatio','none');
+addEventListener('resize',()=>{zpts=[];drawZone();});   // stale points would land wrong
+$('zclear').onclick=()=>{zpts=[];drawZone();};
+$('zsave').onclick=async()=>{
+  const name=$('znm').value.trim(), cam=$('zcam').value, img=$('zshot');
+  if(!cam)return toast('No camera is sending frames');
+  if(!name)return toast('Name the zone first');
+  if(zpts.length<3)return toast('A zone needs at least three points');
+  const r=img.getBoundingClientRect();
+  const polygon=zpts.map(([x,y])=>[Math.round(x/r.width*img.naturalWidth),
+                                   Math.round(y/r.height*img.naturalHeight)]);
+  try{
+    await j('/api/zones',{method:'POST',
+      body:JSON.stringify({name,polygon,camera:cam})});
+    toast(`Zone “${name}” saved · arms on next start`);
+    $('znm').value=''; zpts=[]; drawZone(); loadCameras();
+  }catch(e){ toast('Could not save the zone'); }
+};
+
+async function camPost(path,body){
+  const r=await fetch(path,{method:'POST',body:JSON.stringify(body)});
+  if(!r.ok)throw new Error(await r.text()||r.status);
+  return r.json();
+}
+$('camTest').onclick=async()=>{
+  const source=$('csrc').value.trim();
+  if(!source)return toast('Enter a source first');
+  $('camTestOut').textContent='opening…';
+  try{
+    const r=await camPost('/api/camera/test',{source});
+    $('camTestOut').textContent=r.ok?`✓ ${r.detail}`:`✗ ${r.detail}`;
+    $('camTestOut').style.color=r.ok?'var(--ok)':'var(--fired)';
+  }catch(e){ $('camTestOut').textContent='✗ test failed'; }
+};
+$('camAdd').onclick=async()=>{
+  const source=$('csrc').value.trim(), name=$('cnm').value.trim();
+  if(!source||!name)return toast('Source and name are both required');
+  try{
+    await camPost('/api/camera/source',{source,name});
+    $('csrc').value=''; $('cnm').value=''; $('camTestOut').textContent='';
+    toast(`${name} added · starts capturing on the next restart`);
+    loadCameras();
+  }catch(e){ toast(String(e.message||e).slice(0,90)); }
+};
+$('camRows').onclick=async e=>{
+  const name=e.target.closest('[data-camrm]')?.dataset.camrm; if(!name)return;
+  if(!confirm(`Remove ${name}? Its recorded observations stay in memory.`))return;
+  try{ await camPost('/api/camera/source',{remove:name}); toast(`${name} removed`); loadCameras(); }
+  catch(err){ toast('Could not remove the camera'); }
+};
+/* FR-CM-4: actually reopen every source rather than re-reading the status we
+   already poll — "test" that only echoes cached health tests nothing. */
+$('camTestAll').onclick=async()=>{
+  if(!cams.length)return toast('No cameras configured');
+  toast(`Testing ${cams.length} camera${cams.length>1?'s':''}…`);
+  const rs=await Promise.all(cams.map(c=>camPost('/api/camera/test',{source:c.source})
+    .catch(()=>({ok:false}))));
+  const ok=rs.filter(r=>r.ok).length;
+  toast(`${ok} of ${cams.length} reachable`);
+};
+onEnter.cameras=()=>{loadCameras();loadShot();};
+
+/* ================================================================
+   M6 — settings (FR-ST-1..7)
+   ================================================================ */
+const setSeg=(g,v)=>[...$(g).children].forEach(b=>
+  b.setAttribute('aria-pressed',String(b.dataset.v===v)));
+let setState={};
+
+async function loadSettings(){
+  try{
+    const [s,u,st]=await Promise.all([j('/api/settings'),j('/api/auth/status'),j('/api/stats')]);
+    setState=s;
+    setSeg('setSched',u.delivery_schedule); setSeg('setSink',u.delivery_sink);
+    $('setDest').value=u.delivery_destination||'';
+    setDelivFields(u.delivery_sink);
+    $('setTgPill').textContent=s.telegram_token_set?'set':'not set';
+    $('setTgPill').className='pill '+(s.telegram_token_set?'up':'down');
+    $('setTeam').innerHTML=s.team.map(m=>`<div class="mrow">
+        <span class="ava">${esc(m.username.slice(0,2).toUpperCase())}</span>
+        <div style="flex:1"><p style="font-weight:500;font-size:14px">${esc(m.username)}${m.you?' <span style="color:var(--ink-3);font-weight:400">· you</span>':''}</p>
+        <span style="font-size:12px;color:var(--ink-3)">${esc(m.schedule.replace('_',' '))} · ${esc(m.sink.replace('_',' '))}</span></div></div>`).join('');
+    $('setFace').classList.toggle('off',!s.face_matching);
+    $('setFace').setAttribute('aria-pressed',String(s.face_matching));
+    $('setFaceNote').textContent=s.face_matching
+      ? 'On. Faces are matched to named people. Consent and local law are on you.'
+      : 'Off. Entities are track IDs like Person 01. Nearly every rule works without it.';
+    $('setKeyPill').textContent=s.anthropic_key_set?'set':'not set';
+    $('setKeyPill').className='pill '+(s.anthropic_key_set?'up':'down');
+    $('setRet').value=s.retention_days;
+    $('setDir').textContent=s.data_dir;
+    $('setCalls').textContent=`${s.reasoning_calls_today} today`;
+    $('setCams').textContent=`${st.system.cameras_online} / ${st.system.cameras_total}`;
+    $('setEngine').textContent=st.system.engine;
+    $('setEngine').className='pill '+(st.system.engine==='running'?'up':'down');
+    $('setStore').textContent=st.system.storage
+      ? `${tb(st.system.storage.used_bytes)} / ${tb(st.system.storage.total_bytes)} TB`:'—';
+  }catch(e){}
+}
+const saveSettings=async body=>{
+  try{ await j('/api/settings',{method:'POST',body:JSON.stringify(body)}); return true; }
+  catch(e){ toast('Could not save'); return false; }
+};
+$('setSched').onclick=async e=>{
+  const v=e.target.closest('[data-v]')?.dataset.v; if(!v)return;
+  setSeg('setSched',v);
+  if(await saveSettings({delivery_schedule:v}))
+    toast(v==='off'?'Digest off':`Digest · ${v.replace('_',' ')}`);
+};
+/* the destination means something different per channel, and the bot token is
+   only anyone's business on Telegram */
+function setDelivFields(v){
+  $('setDestField').hidden=v==='in_app';
+  $('setTgField').hidden=v!=='telegram';
+  $('setDest').placeholder=v==='telegram'?'123456789 (chat id)'
+    :v==='webhook'?'https://hooks.example.com/…':'you@example.com';
+  $('setDestHint').textContent=v==='telegram'
+    ? 'Your chat id — message the bot, then open api.telegram.org/bot<token>/getUpdates to read it.'
+    : 'Where the briefing lands — an address, or a URL to POST to.';
+}
+$('setSink').onclick=async e=>{
+  const v=e.target.closest('[data-v]')?.dataset.v; if(!v)return;
+  setSeg('setSink',v); setDelivFields(v);
+  if(await saveSettings({delivery_sink:v}))toast(`Delivering by ${v.replace('_',' ')}`);
+};
+$('setTgSave').onclick=async()=>{
+  const t=$('setTg').value.trim();
+  if(!t)return toast('Paste the bot token first');
+  if(await saveSettings({telegram_token:t})){$('setTg').value='';toast('Bot token saved');loadSettings();}
+};
+$('setDestTest').onclick=async()=>{
+  toast('Sending a test…');
+  try{ const r=await j('/api/settings/test',{method:'POST'}); toast(r.detail); }
+  catch(e){ toast('Test failed'); }
+};
+$('setDest').onchange=async e=>{
+  if(await saveSettings({delivery_destination:e.target.value.trim()}))toast('Destination saved');
+};
+/* FR-ST-3: enabling identity is a consent decision, so it asks; turning it
+   off never does. */
+$('setFace').onclick=async()=>{
+  const on=!setState.face_matching;
+  if(on&&!confirm('Face matching stores face signatures for everyone the cameras see. '
+    +'Only enable it where you have the right to. Turn it on?'))return;
+  if(await saveSettings({face_matching:on})){
+    toast(`Face matching ${on?'on':'off'} · applies to new sightings`);
+    loadSettings();
+  }
+};
+$('setKeySave').onclick=async()=>{
+  const k=$('setKey').value.trim();
+  if(!k)return toast('Paste a key first');
+  if(await saveSettings({anthropic_key:k})){$('setKey').value='';toast('Key saved');loadSettings();}
+};
+$('setRetSave').onclick=async()=>{
+  const d=parseInt($('setRet').value,10);
+  if(!(d>0))return toast('Days must be a positive number');
+  if(await saveSettings({retention_days:d}))toast(`Keyframes kept ${d} days`);
+};
+$('setExport').onclick=()=>{location.href='/api/export';toast('Exporting memory…');};
+$('setRebuild').onclick=async()=>{
+  toast('Rebuilding baseline…');
+  try{
+    const r=await j('/api/baseline/rebuild',{method:'POST'});
+    toast(`Baseline rebuilt · ${r.habits} habits, ${r.relations} relations`);
+    loadEntities().then(()=>{gLoaded=false;loadGraph();});
+  }catch(e){ toast('Rebuild failed'); }
+};
+onEnter.settings=loadSettings;
+
+/* ================================================================
+   M7 — Map View (FR-MP-1..4, FR-DB-5)
+   This product has no site plan: a zone is a polygon in one camera's
+   frame. So the map is the camera views themselves with their zones
+   drawn on them, and every entity plotted on the zone it was last
+   seen in — nothing here invents geography it doesn't have.
+   ================================================================ */
+const MKIND={person:['P','var(--ok)'],vehicle:['V','#7B4FB0'],
+             object:['O','var(--ink-3)'],alert:['!','var(--fired)']};
+let mapData=null, mapHours=24, mapFocus=null;
+
+const mapNote=t=>`<p class="mono" style="color:var(--ink-3);padding:18px">${t}</p>`;
+
+async function loadMap(){
+  try{mapData=await j('/api/map?hours='+mapHours);}catch(e){mapData=null;}
+  paintMap();
+}
+
+/* Everything is drawn in frame pixels, so the overlay's viewBox is the
+   snapshot's natural size and zone polygons need no conversion at all —
+   the same coordinates the pipeline tests against. */
+function mapOverlay(cam,marks,W,H,px){
+  /* frame pixels per screen pixel: markers and labels stay the same size on
+     screen whatever the snapshot's resolution or how wide the tile is */
+  const k=W/(px||340), s=1.4*k, R=14*k, F=9.5*k;
+  const zpos={};
+  const zones=cam.zones.map(z=>{
+    zpos[z.id]=[z.cx,z.cy];
+    return `<polygon points="${z.polygon.map(p=>p.join(',')).join(' ')}"
+        fill="var(--unusual)" fill-opacity=".12" stroke="var(--unusual)"
+        stroke-width="${s}" stroke-dasharray="${5*s} ${4*s}"/>`
+      +(z.cx==null?'':`<text x="${z.cx}" y="${z.cy-R*1.5}" font-size="${F}" fill="#fff"
+        text-anchor="middle" font-family="IBM Plex Mono" stroke="#000"
+        stroke-width="${2.5*s}" style="paint-order:stroke">${esc(z.name)}</text>`);
+  }).join('');
+  const loose=marks.filter(m=>!zpos[m.zone]||zpos[m.zone][0]==null);
+  const stack={};
+  const mk=marks.map(m=>{
+    let x,y;
+    const p=zpos[m.zone];
+    if(p&&p[0]!=null){
+      /* several entities in one zone would land on the same pixel */
+      const n=stack[m.zone]=(stack[m.zone]||0)+1;
+      x=p[0]+((n-1)%3-1)*R*1.7; y=p[1]+Math.floor((n-1)/3)*R*1.7;
+    }else{
+      /* seen on this camera but in no zone — parked along the bottom edge */
+      const i=loose.indexOf(m);
+      x=(i+1)/(loose.length+1)*W; y=H-R*1.5;
+    }
+    const [ch,col]=MKIND[m.kind]||MKIND.object;
+    return `<g class="mk" data-ent="${esc(m.entity_id)}">
+      <title>${esc(m.label)}${m.zone_name?' · '+esc(m.zone_name):''}</title>
+      <circle cx="${x}" cy="${y}" r="${R}" fill="${col}" stroke="var(--paper)" stroke-width="${s}"/>
+      <text x="${x}" y="${y+F*.36}" font-size="${F}" fill="#fff" text-anchor="middle"
+            font-family="IBM Plex Mono">${ch}</text></g>`;
+  }).join('');
+  return zones+mk;
+}
+
+function mapTiles(grid,cams,byCam,clickable){
+  grid.className='mapgrid'+(cams.length===1?' one':'');
+  grid.innerHTML=cams.map(c=>`
+    <div class="mtile" data-cam="${esc(c.name)}">
+      <div class="mth"><span>${esc(c.name)}</span>
+        <span class="pill ${c.up?'up':'down'}">${c.up?'live':'no signal'}</span>
+        <span class="mono">${(byCam[c.name]||[]).length} seen · ${c.zones.length} zone${c.zones.length===1?'':'s'}</span></div>
+      <div class="mtb"><img src="/snapshot?cam=${encodeURIComponent(c.name)}&t=${Date.now()}"
+             alt="latest frame from ${esc(c.name)}" onerror="feedDown(this)">
+        <svg class="ov" viewBox="0 0 1280 720" preserveAspectRatio="none"></svg></div>
+    </div>`).join('');
+  grid.querySelectorAll('.mtile').forEach(t=>{
+    const cam=cams.find(c=>c.name===t.dataset.cam), sv=t.querySelector('svg.ov');
+    const draw=(w,h)=>{sv.setAttribute('viewBox',`0 0 ${w} ${h}`);
+      sv.innerHTML=mapOverlay(cam,byCam[cam.name]||[],w,h,t.querySelector('.mtb').clientWidth);};
+    const img=t.querySelector('img');
+    if(img&&img.complete&&img.naturalWidth)draw(img.naturalWidth,img.naturalHeight);
+    else if(img){img.addEventListener('load',()=>draw(img.naturalWidth,img.naturalHeight),{once:true});
+                 img.addEventListener('error',()=>draw(1280,720),{once:true});}
+    else draw(1280,720);
+    t.querySelector('.mtb').onclick=e=>{
+      const mk=e.target.closest('.mk');
+      if(mk)return openEntity(mk.dataset.ent);
+      if(!clickable)return go('map');
+      /* FR-MP-4: no pan/zoom to recenter — focus is the whole navigation model */
+      mapFocus=mapFocus?null:cam.name; paintMap();
+    };
+  });
+}
+
+function paintMap(){
+  const d=mapData;
+  if(!d||!d.cameras.length){
+    $('mapGrid').innerHTML=$('dashMapGrid').innerHTML=
+      mapNote('no cameras configured — add one in Camera Manager');
+    $('mapLive').innerHTML=$('mapZones').innerHTML='';
+    $('mapLegend').innerHTML=$('dashMapLegend').innerHTML='';
+    return;
+  }
+  const byCam={};
+  d.markers.forEach(m=>(byCam[m.camera]=byCam[m.camera]||[]).push(m));
+  const cams=mapFocus?d.cameras.filter(c=>c.name===mapFocus):d.cameras;
+  mapTiles($('mapGrid'),cams,byCam,true);
+  mapTiles($('dashMapGrid'),d.cameras.slice(0,2),byCam,false);
+
+  const legend=[['person','People'],['vehicle','Vehicles'],['object','Objects'],['alert','Alerts']]
+    .map(([k,t])=>`<span><i style="background:${MKIND[k][1]}"></i>${t} · ${d.markers.filter(m=>m.kind===k).length}</span>`).join('');
+  $('dashMapLegend').innerHTML=legend;
+  $('mapLegend').innerHTML=legend+`<span class="mono" style="margin-left:auto;color:var(--ink-3)">`
+    +`${cams.length} of ${d.cameras.length} cameras${mapFocus?' · click the frame to show all':''}</span>`;
+  const win=d.hours>=48?Math.round(d.hours/24)+' days':d.hours+' hours';
+  $('mapSub').textContent=`${d.markers.length} on the map in the last ${win}`
+    +` · zones as the cameras see them, not a floorplan.`;
+
+  const live=[...d.markers].reverse().slice(0,14);
+  $('mapLive').innerHTML=live.length?live.map(m=>`
+    <div class="row2 link" data-ent="${esc(m.entity_id)}">
+      <span class="ava" style="background:${(MKIND[m.kind]||MKIND.object)[1]};width:22px;height:22px">${(MKIND[m.kind]||MKIND.object)[0]}</span>
+      <span>${esc(m.label)}</span>
+      <span class="mono">${esc(m.zone_name||m.camera||'—')}</span></div>`).join('')
+    :mapNote('nothing seen in this window');
+
+  const zs=d.cameras.flatMap(c=>c.zones).concat(d.unassigned_zones||[]);
+  $('mapZones').innerHTML=zs.length?zs.map(z=>`
+    <div class="row2 link" data-zcam="${esc(z.camera||'')}">
+      <span>${esc(z.name)}</span>
+      <span class="mono">${d.markers.filter(m=>m.zone===z.id).length} live · ${esc(z.camera||'unassigned')}</span></div>`).join('')
+    :mapNote('no zones drawn — draw one in Camera Manager');
+}
+
+$('mapLive').onclick=e=>{const r=e.target.closest('[data-ent]');if(r)openEntity(r.dataset.ent);};
+$('mapZones').onclick=e=>{const r=e.target.closest('[data-zcam]');
+  if(r&&r.dataset.zcam){mapFocus=r.dataset.zcam;paintMap();}};
+$('mapRecenter').onclick=()=>{mapFocus=null;paintMap();};
+$('mapRange').onclick=e=>{const b=e.target.closest('button');
+  if(b){mapHours=+b.dataset.h;loadMap();}};
+onEnter.map=loadMap;
+
+/* ================================================================
+   M8 — Cases + Reports (FR-CS-1..4, FR-RP-1..3)
+   A case is a flat container over ids that already exist elsewhere,
+   so nothing here copies data: a card shows what its ids resolve to
+   now. A report is the opposite — frozen at generation, because it
+   is a record of what memory said then.
+   ================================================================ */
+const KIC={alert:'▲',entity:'◆',event:'●'};
+const stCase={open:'open',review:'review',closed:'closed'};
+const nextCase={open:'review',review:'closed',closed:null};
+let caseFilter='', caseList=[], caseAttach=null;   // caseAttach: {kind,ref_id,label}
+
+const dayTime=ts=>ts?new Date(ts*1000).toLocaleDateString([],{month:'short',day:'numeric'}):'—';
+
+function caseCard(c){
+  const items=c.items.map(i=>
+    `<span class="caseitem"${i.kind==='entity'?` data-ent="${esc(i.ref_id)}"`:''}
+       title="${esc(i.kind)}">${kfThumb(i.keyframe,'s')||KIC[i.kind]||'●'} ${esc(i.label)}${
+         i.timestamp?` <span class="mono" style="color:var(--ink-3)">${esc(fullTime(i.timestamp))}</span>`:''}</span>`).join('')
+    ||`<span class="mono" style="color:var(--ink-3);font-size:11px">nothing attached yet — add from an alert, entity or event</span>`;
+  const nx=nextCase[c.status];
+  const meta=[`${c.counts.alert} alerts · ${c.counts.entity} entities · ${c.counts.event} events`,
+              `opened ${dayTime(c.opened_at)}`,
+              c.closed_at?`closed ${dayTime(c.closed_at)}`:'',
+              c.owner?`owner ${esc(c.owner).slice(0,12)}`:''].filter(Boolean);
+  return `<div class="casecard" data-case="${esc(c.id)}">
+    <div class="top"><h3>${esc(c.title)}</h3>
+      <span class="casestat ${stCase[c.status]}">${c.status==='review'?'in review':esc(c.status)}</span>
+      ${nx?`<button class="linkish mono" data-next="${nx}" style="margin-left:auto;color:var(--unusual)">Move to ${nx} →</button>`:''}</div>
+    ${c.description?`<p class="desc">${esc(c.description)}</p>`:''}
+    <div class="caselinks">${items}</div>
+    <div class="casemeta">${meta.map(m=>`<span>${m}</span>`).join('')}</div></div>`;
+}
+
+async function loadCases(){
+  let r; try{ r=await j('/api/cases'+(caseFilter?'?status='+caseFilter:'')); }catch(e){ return; }
+  caseList=r.cases||[];
+  const c=r.counts||{};
+  /* counts are unfiltered, so filtering never looks like cases disappeared */
+  $('caseFilters').querySelectorAll('.chip').forEach(b=>{
+    const n=b.querySelector('.c'); if(n)n.textContent=c[b.dataset.st||'all']??0;
+    b.setAttribute('aria-pressed',String(b.dataset.st===caseFilter));
+  });
+  $('caseList').innerHTML=caseList.length?caseList.map(caseCard).join('')
+    :empty(c.all?'no cases with this status':'no cases yet — start one from an alert, an entity or an event');
+}
+
+$('caseFilters').querySelectorAll('.chip').forEach(b=>b.onclick=()=>{
+  caseFilter=caseFilter===b.dataset.st?'':b.dataset.st; loadCases();
+});
+$('caseList').onclick=async e=>{
+  const b=e.target.closest('[data-next]'); if(!b)return;
+  const id=b.closest('[data-case]').dataset.case;
+  await j('/api/cases/'+encodeURIComponent(id)+'/status',
+    {method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({status:b.dataset.next})});
+  toast('Case moved to '+b.dataset.next); loadCases();
+};
+onEnter.cases=loadCases;
+
+/* ---------- attach dialog: the one way anything joins a case ---------- */
+async function openCaseDlg(target){
+  caseAttach=target;                       // null = plain "New case" from the pane
+  $('caseDlgT').textContent=target?'Add to case':'New case';
+  $('caseDlgSub').textContent=target?`${target.kind} · ${target.label}`:'';
+  $('caseDlgPick').hidden=!target;
+  $('caseTitle').value=''; $('caseDesc').value='';
+  if(target){
+    try{ caseList=(await j('/api/cases')).cases||[]; }catch(e){}
+    const open=caseList.filter(c=>c.status!=='closed');
+    $('caseDlgSel').innerHTML=open.map(c=>`<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('')
+      ||'<option value="">no open cases yet</option>';
+    $('caseAttachGo').disabled=!open.length;
+  }
+  $('caseDlg').showModal();
+}
+const attachTo=id=>j('/api/cases/'+encodeURIComponent(id)+'/attach',
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(caseAttach)});
+
+$('caseAttachGo').onclick=async()=>{
+  const id=$('caseDlgSel').value; if(!id)return;
+  try{ await attachTo(id); }catch(e){ toast('Attach failed'); return; }
+  toast('Attached'); $('caseDlg').close(); if(location.hash==='#cases')loadCases();
+};
+$('caseCreateGo').onclick=async()=>{
+  const title=$('caseTitle').value.trim();
+  if(!title){toast('Name the case first');return;}
+  let r; try{
+    r=await j('/api/cases',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({title,description:$('caseDesc').value.trim(),...(caseAttach||{})})});
+  }catch(e){ toast('Could not create case'); return; }
+  if(!r.ok){toast('Could not create case');return;}
+  $('caseDlg').close(); toast(caseAttach?'Case created and attached':'Case created'); go('cases');
+};
+$('caseNew').onclick=()=>openCaseDlg(null);
+$('entCase').onclick=()=>{const d=entOpen; if(d)openCaseDlg({kind:'entity',ref_id:d.id,label:d.label});};
+$('kfCase').onclick=()=>{const t=$('kfDlg').dataset;
+  if(t.oid)openCaseDlg({kind:t.kind||'event',ref_id:t.oid,label:$('kfTitle').textContent});};
+document.addEventListener('click',e=>{
+  const b=e.target.closest('#alertRows [data-case-add]'); if(!b)return;
+  const tr=b.closest('tr');
+  openCaseDlg({kind:'alert',ref_id:tr.dataset.id,label:b.dataset.caseAdd});
+});
+
+/* ---------- reports ---------- */
+async function loadReports(){
+  let r; try{ r=await j('/api/reports'); }catch(e){ return; }
+  const rows=r.reports||[];
+  $('reportRows').innerHTML=rows.length?rows.map(x=>
+    `<tr><td><b>${esc(x.name)}</b></td>
+      <td class="mono">${dayTime(x.range_start)} → ${dayTime(x.range_end)}</td>
+      <td class="mono">${fullTime(x.generated_at)}</td>
+      <td class="mono">${esc(x.format.toUpperCase())} · ${Math.max(1,Math.round(x.bytes/1024))} KB</td>
+      <td class="mono"><a href="/api/report/${encodeURIComponent(x.report_id)}/download">Download →</a></td></tr>`
+    ).join('')
+    :`<tr><td colspan="5" class="mono" style="color:var(--ink-3);padding:22px">no reports yet — generate one above</td></tr>`;
+  /* the only cadence this product actually runs on is the digest delivery
+     schedule, so that is what Scheduled shows — not a wishlist of report types */
+  const s=r.schedule||{};
+  $('repSched').innerHTML=s.cadence&&s.cadence!=='off'
+    ?`<div class="row2"><span>Digest delivery</span><span class="pill up" style="margin-left:auto">${esc(s.cadence)} · ${esc(s.sink||'in app')}</span></div>`
+    :empty('no schedule — digests are off in System Settings');
+}
+$('repGo').onclick=async()=>{
+  $('repGo').disabled=true;
+  try{
+    const r=await j('/api/reports',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({hours:+$('repRange').value,format:$('repFmt').value})});
+    toast(r.ok?`Report generated · ${r.items} findings`:'Could not generate report');
+  }catch(e){ toast('Could not generate report'); }
+  $('repGo').disabled=false; loadReports();
+};
+$('repSchedGo').onclick=()=>go('settings');
+onEnter.reports=loadReports;
+
+/* ================================================================
+   V4-M9 — ⌘K palette (FR-SH-5) + AI insights (FR-DB-7)
+   ================================================================ */
+
+/* The palette has no search endpoint behind it: the shell already holds the
+   pane list, the camera roster and the entity list, so the index is what is
+   already on screen plus rules.yaml. Anything it can't match is a question,
+   and questions belong to the assistant — that's the last row, always. */
+const CIC={pane:'▤',camera:'▣',entity:'◆',rule:'▲',ask:'✧'};
+let cmdRules=[], cmdHits=[], cmdSel=0;
+
+/* jumping to a filtered pane = typing in its own search box, so the pane's
+   existing handler does the work and the box shows why the list is short */
+const cmdFill=(pane,id,v)=>{go(pane);const el=$(id);el.value=v;el.dispatchEvent(new Event('input'));};
+
+function cmdIndex(){
+  const ix=Object.keys(titles).map(p=>({k:'pane',label:titles[p],sub:'pane',run:()=>go(p)}));
+  for(const c of cams)
+    ix.push({k:'camera',label:c.name||c.id,sub:c.up?'online':'offline',
+             run:()=>cmdFill('live','liveSearch',c.name||c.id)});
+  for(const e of ents)
+    ix.push({k:'entity',label:entName(e),sub:typeName[e.type]||e.type,
+             run:()=>openEntity(e.id)});
+  for(const r of cmdRules)
+    ix.push({k:'rule',label:ruleName(r.name),sub:r.enabled===false?'rule · off':'rule',
+             run:()=>cmdFill('alerts','alertSearch',r.name)});
+  return ix;
+}
+
+function cmdPaint(){
+  const q=$('cmdQ').value.trim(), lq=q.toLowerCase();
+  cmdHits=(lq?cmdIndex().filter(i=>i.label.toLowerCase().includes(lq)):cmdIndex()).slice(0,40);
+  if(q) cmdHits.push({k:'ask',label:`Ask: ${q}`,sub:'assistant',
+                      run:()=>{go('assistant');runAsk(q);}});
+  cmdSel=0;
+  $('cmdList').innerHTML=cmdHits.map((i,n)=>
+    `<div class="cmdrow" role="option" data-n="${n}" aria-selected="${n===0}">
+       <span class="ic">${CIC[i.k]}</span><span>${esc(i.label)}</span>
+       <span class="k">${esc(i.sub||'')}</span></div>`).join('')
+    ||empty('nothing matches — press Enter to ask the assistant');
+}
+
+function cmdMove(d){
+  const rows=[...$('cmdList').children];
+  if(!rows.length)return;
+  cmdSel=(cmdSel+d+cmdHits.length)%cmdHits.length;
+  rows.forEach((r,n)=>r.setAttribute('aria-selected',String(n===cmdSel)));
+  rows[cmdSel].scrollIntoView({block:'nearest'});
+}
+
+const cmdRun=n=>{const h=cmdHits[n]; if(!h)return; $('cmdDlg').close(); h.run();};
+
+async function openCmd(){
+  /* rules are the one thing the shell never loaded; fetch once, then it's local */
+  if(!cmdRules.length){try{cmdRules=(await j('/api/rules')).rules||[];}catch(e){}}
+  $('cmdQ').value=''; cmdPaint(); $('cmdDlg').showModal(); $('cmdQ').focus();
+}
+
+$('cmdQ').oninput=cmdPaint;
+$('cmdQ').onkeydown=e=>{
+  if(e.key==='ArrowDown'){e.preventDefault();cmdMove(1);}
+  else if(e.key==='ArrowUp'){e.preventDefault();cmdMove(-1);}
+  else if(e.key==='Enter'){e.preventDefault();cmdRun(cmdSel);}
+};
+$('cmdList').onclick=e=>{const r=e.target.closest('.cmdrow'); if(r)cmdRun(+r.dataset.n);};
+addEventListener('keydown',e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openCmd();}
+});
+$('openCmd').onclick=openCmd;
+/* the topbar search was decorative; it's the same palette. Click or type opens
+   it — not focus, or tabbing past the box would throw a modal at you. */
+$('topSearch').onclick=openCmd;
+$('topSearch').oninput=async e=>{
+  const v=e.target.value; e.target.value='';
+  await openCmd(); $('cmdQ').value=v; cmdPaint();
+};
+
+/* ---------- AI insights (FR-DB-7) ----------
+   Reuses the digest the delivery already runs on — no second analyzer. The
+   dashboard card is the top of that triage queue, not a different opinion. */
+const IIC={f:'▲',u:'◇',k:'⧉'};
+const insightRow=(k,hd,dc,tm,ent)=>`<div class="insight"${ent?` data-ent="${esc(ent)}" style="cursor:pointer"`:''}>
+  <span class="ic ${k}">${IIC[k]}</span>
+  <div class="bd"><p class="hd">${esc(hd)}</p><p class="dc">${dc}</p><div class="m">${esc(tm)}</div></div></div>`;
+
+async function loadInsights(){
+  let d; try{ d=await j('/api/digest?hours=24'); }
+  catch(e){ $('insights').innerHTML=empty('insights unavailable'); return; }
+  const rows=[], body=i=>`<b>${esc(i.label)}</b>${i.location?' at '+esc(i.location):''}`;
+  for(const m of (d.merge_suggestions||[]).slice(0,1))
+    rows.push(insightRow('k','Possible same person',
+      `<b>${esc(m.source_label)}</b> and <b>${esc(m.target_label)}</b> match at ${pct(m.confidence)} — merge them from either profile.`,
+      'identity', m.source_id));
+  for(const i of (d.rule_fired||[]).slice(0,2))   /* the digest titles it raw; the UI never shows rule_name */
+    rows.push(insightRow('f','Rule fired · '+ruleName(i.title.replace('Rule fired: ','')),
+                         body(i),fullTime(i.timestamp),i.entity_id));
+  for(const i of (d.unusual||[]).slice(0,Math.max(0,4-rows.length)))
+    rows.push(insightRow('u',i.title,body(i),fullTime(i.timestamp),i.entity_id));
+  const r=d.routine||{};
+  $('insights').innerHTML=rows.slice(0,4).join('')
+    ||insightRow('k','Nothing unusual in 24 hours',
+        `${r.observations||0} observation(s) across ${r.entities||0} entit(y/ies), all matching the learned baseline.`,
+        'baseline','');
+}
+$('insightsAll').onclick=()=>go('timeline');
+onEnter.dashboard=loadInsights;
+
+/* ---------- boot ---------- */
+let start='dashboard';
+try{start=location.hash.slice(1)||localStorage.getItem('io-pane')||'dashboard';}catch(e){}
+go(start,null,true);
+/* graph node size joins onto the roster's times_seen — roster first */
+loadSystem(); loadUser(); loadCameras(); loadAlerts(); loadTimeline(); loadMap();
+loadEntities().then(loadGraph);
+setInterval(loadSystem,15000);
+setInterval(loadAlerts,30000);   // badge must stay honest on whatever pane you're on
+setInterval(loadCameras,10000);   // status only — tiles rebuild only if the roster changed
+</script>
+</html>
