@@ -6,8 +6,6 @@
 
 **Turn camera streams into a memory you can question — not footage you have to scrub.**
 
-[![tests](https://github.com/Infinex-Labs/Intelligence-OS/actions/workflows/tests.yml/badge.svg)](https://github.com/Infinex-Labs/Intelligence-OS/actions/workflows/tests.yml)
-[![lint](https://github.com/Infinex-Labs/Intelligence-OS/actions/workflows/lint.yml/badge.svg)](https://github.com/Infinex-Labs/Intelligence-OS/actions/workflows/lint.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-no%20cloud%20required-success.svg)](docs/installation.md)
