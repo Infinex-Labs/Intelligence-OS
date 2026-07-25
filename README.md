@@ -110,7 +110,7 @@ python -m intelligence_os.web --webcam 0
 ```
 
 First visit prompts you to create a login. The dashboard streams the live feed
-and exposes Alerts, Timeline, Ask, Rules, and Reports.
+and exposes Alerts, Timeline, the AI Assistant, Rules, and Reports.
 
 ---
 
@@ -145,6 +145,30 @@ python -m intelligence_os.operator delete  <entity_id>     # cascade delete = pr
 # Ask a question from the CLI
 python -m intelligence_os.ask "who was near the door this afternoon?"
 ```
+
+### The AI Assistant pane
+
+The same grounded query surface, as a chat. Threads are stored server-side, so
+they survive a reload and follow-ups ("and was anyone with them?") resolve
+against the thread the server has, not a client-side array:
+
+- **Chat history** in the left rail, grouped Today / Yesterday / Previous 7 days,
+  searchable, renameable, deletable (two clicks — no browser confirm dialog).
+- **Reopening a thread replays the stored answer**, not a fresh query. A report
+  of what memory said then must not silently change when memory moves on.
+- **KPI strip** — threads, questions, entities surfaced, observations scanned,
+  keyframes cited, rule events, average answer time. Every figure is a `SUM`
+  over stored turns, not a tally the browser keeps.
+- **Per-answer counts** under each reply, plus the query trace, so an answer can
+  be audited on its own.
+- **Export** writes the open thread to Markdown, answers and traces included.
+
+Threads are scoped to the signed-in user, and that scope is a `WHERE` clause on
+every read *and* mutation in `store.py` — knowing a thread id is not authority to
+read, rename, delete or append to it. Endpoints: `GET/POST /api/chats`,
+`GET /api/chats/<id>`, `POST /api/chats/<id>/rename`, `POST /api/chats/<id>/delete`,
+and `POST /api/ask` (takes `conversation_id`, appends the turn, returns the
+evidence, the counts and the refreshed stats).
 
 ### Multi-camera setup
 
@@ -192,9 +216,9 @@ layer, SQLite *is* the database, and the schema is the contract. Start with
 
 | File | Role | LOC |
 |---|---|---|
-| `store.py` | **The product.** SQLite data model + weights/decay + merge/split/cascade-delete. The schema string at the top is the contract. | 808 |
+| `store.py` | **The product.** SQLite data model + weights/decay + merge/split/cascade-delete + assistant threads. The schema string at the top is the contract. | 943 |
 | `run.py` | Pipeline orchestrator — one thread per camera over shared models; the full cascade lives in `_camera_loop`. | 448 |
-| `web.py` | `http.server`-based dashboard + JSON API (auth, live MJPEG, alerts, timeline, ask, rules, reports). | 1652 |
+| `web.py` | `http.server`-based dashboard + JSON API (auth, live MJPEG, alerts, timeline, ask + chat history, rules, reports). | 1778 |
 | `identity.py` | Face embedding + match-or-mint against the persistent gallery. The one guarantee everything else rests on. | 128 |
 | `detect.py` | YOLO + ByteTrack; object persistence / re-id. | 150 |
 | `capture.py` | Webcam/RTSP/video source + MOG2 motion gate + settled-keyframe detector. | 156 |
@@ -220,7 +244,7 @@ are checked in.
 
 ## Data model
 
-Six core tables (full schema in `store.py`):
+Core tables (full schema in `store.py`):
 
 - **`entities`** — a person or object. Anonymous by default (`entity_N`), given a
   `label` when you name them.
@@ -235,6 +259,10 @@ Six core tables (full schema in `store.py`):
 - **`relations`** — distilled `relation` / `habit` / `event` rows with a
   `weight`, a `candidate → confirmed` lifecycle, decay, and
   `supporting_observation_ids` for provenance.
+- **`conversations` / `chat_turns`** — the assistant's threads. Each turn keeps
+  the question, the answer, the evidence payload it was rendered from, and the
+  counts denormalized out of that payload so the KPI strip is one aggregate
+  query instead of a JSON scan.
 
 Every higher-level claim (a habit, an alert, an answer) can be walked back down
 to the observations and keyframes that produced it. That traceability is the
@@ -367,3 +395,4 @@ cascades to their signatures, observations, and relations.
 **RTSP won't connect.** The pinned `opencv-python-headless==4.10` ships
 `FFMPEG:YES` (required for RTSP). Don't jump to 5.x, and check the stream URL
 resolves with `ffmpeg`/`ffprobe` first.
+

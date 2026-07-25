@@ -271,6 +271,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.serve_entities()
         elif self.path == '/api/graph':
             self.serve_graph()
+        elif path_clean == '/api/chats':
+            self.serve_chats()
+        elif path_clean.startswith('/api/chats/'):
+            self.serve_chat(path_clean[len('/api/chats/'):])
         elif self.path == '/api/stats':
             self.serve_stats()
         elif self.path.startswith('/api/digest'):
@@ -311,6 +315,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.serve_camera_toggle()
         elif self.path == '/api/ask':
             self.serve_ask()
+        elif path_clean == '/api/chats':
+            self.serve_chat_create()
+        elif path_clean.startswith('/api/chats/') and path_clean.endswith('/rename'):
+            self.serve_chat_rename(path_clean[len('/api/chats/'):-len('/rename')])
+        elif path_clean.startswith('/api/chats/') and path_clean.endswith('/delete'):
+            self.serve_chat_delete(path_clean[len('/api/chats/'):-len('/delete')])
         elif self.path == '/api/digest/feedback':
             self.serve_digest_feedback()
         elif self.path.startswith('/api/rules/') and self.path.endswith('/toggle'):
@@ -896,22 +906,142 @@ class RequestHandler(BaseHTTPRequestHandler):
         set_rule_enabled(name, new)
         self.send_json({"name": name, "enabled": new})
 
+    @staticmethod
+    def _ask_counts(result: dict) -> dict:
+        """The four numbers every answer is measured by, counted off the evidence
+        itself — nothing here is a running total the UI could drift from."""
+        ents = result.get('entities') or []
+        return {
+            "entities": len(ents),
+            "observations": int(result.get('total_observations') or 0),
+            "keyframes": sum(len(e.get('keyframes') or []) for e in ents),
+            "rule_events": sum(len(e.get('rule_events') or []) for e in ents),
+        }
+
     def serve_ask(self):
         """Grounded query (§8.2): LLM parses the question, every fact in the
-        response is aggregated from observation rows. Query trace included."""
+        response is aggregated from observation rows. Query trace included.
+
+        The turn is appended to a conversation (V4-M10) so the thread survives a
+        reload, and the follow-up history is read back out of that thread rather
+        than trusted from the client."""
         body = self._read_json()
         question = (body.get('question') or '').strip()
         if not question:
             self.send_error(400, "question required")
             return
-        history = body.get('history')
-        if not isinstance(history, list):      # client-supplied; ask() clamps depth
-            history = None
-        from intelligence_os.ask import ask
+        user_id = getattr(self, 'current_user_id', None)
+        cid = (body.get('conversation_id') or '').strip() or None
+        store = Store()
         try:
-            self.send_json(ask(question, history=history))
-        except RuntimeError as e:
-            self.send_json({"error": str(e)})
+            # deleted while the question was in flight, or never this operator's
+            # to append to — either way the answer opens a thread of their own
+            if cid and not store.get_conversation(cid, user_id):
+                cid = None
+            fresh = cid is None
+            if fresh:
+                cid = store.create_conversation(user_id=user_id)
+            history = [{"q": t["question"], "a": t["answer"] or ""}
+                       for t in store.conversation_turns(cid)]
+            from intelligence_os.ask import ask
+            started = time.time()
+            try:
+                result = ask(question, store=store, history=history)
+            except RuntimeError as e:
+                # nothing was answered, so don't leave a titleless empty thread
+                # sitting in the sidebar — only the thread we just opened goes
+                if fresh:
+                    store.delete_conversation(cid)
+                    cid = None
+                self.send_json({"error": str(e), "conversation_id": cid})
+                return
+            result["conversation_id"] = cid
+            result["latency_ms"] = round((time.time() - started) * 1000)
+            result["counts"] = self._ask_counts(result)
+            # stored as rendered: reopening the thread replays this answer, it
+            # does not re-run the query against a memory that has moved on
+            turn_id = store.add_chat_turn_owned(
+                cid, user_id, question, result.get("answer"), json.dumps(result),
+                result["latency_ms"], counts=result["counts"])
+            row = store.get_conversation(cid, user_id)
+            result["turn_id"] = turn_id
+            result["conversation_title"] = row["title"] if row else None
+            result["stats"] = store.chat_stats(user_id)
+            self.send_json(result)
+        finally:
+            store.close()
+
+    def serve_chats(self):
+        """Sidebar payload: the thread list plus the KPI aggregate, one round trip."""
+        user_id = getattr(self, 'current_user_id', None)
+        store = Store()
+        try:
+            self.send_json({
+                "conversations": [dict(r) for r in store.conversations(user_id)],
+                "stats": store.chat_stats(user_id),
+            })
+        finally:
+            store.close()
+
+    def serve_chat(self, conversation_id):
+        """One thread, with each turn's stored evidence payload re-attached."""
+        store = Store()
+        try:
+            row = store.get_conversation(conversation_id,
+                                         getattr(self, 'current_user_id', None))
+            if not row:
+                self.send_error_json(404, "No such conversation")
+                return
+            turns = []
+            for t in store.conversation_turns(conversation_id):
+                d = dict(t)
+                try:
+                    d["payload"] = json.loads(t["payload"]) if t["payload"] else None
+                except ValueError:
+                    d["payload"] = None      # a truncated row must not break the thread
+                turns.append(d)
+            self.send_json({"conversation": dict(row), "turns": turns})
+        finally:
+            store.close()
+
+    def serve_chat_create(self):
+        store = Store()
+        try:
+            cid = store.create_conversation(
+                (self._read_json().get('title') or '').strip() or None,
+                user_id=getattr(self, 'current_user_id', None))
+            self.send_json({"conversation": dict(store.get_conversation(cid))})
+        finally:
+            store.close()
+
+    def serve_chat_rename(self, conversation_id):
+        title = (self._read_json().get('title') or '').strip()
+        if not title:
+            self.send_error_json(400, "title required")
+            return
+        user_id = getattr(self, 'current_user_id', None)
+        store = Store()
+        try:
+            # scoped: another operator's thread is a 404, not a rename
+            if not store.rename_conversation(conversation_id, title, user_id):
+                self.send_error_json(404, "No such conversation")
+                return
+            self.send_json({"conversation":
+                            dict(store.get_conversation(conversation_id, user_id))})
+        finally:
+            store.close()
+
+    def serve_chat_delete(self, conversation_id):
+        user_id = getattr(self, 'current_user_id', None)
+        store = Store()
+        try:
+            if not store.delete_conversation(conversation_id, user_id):
+                self.send_error_json(404, "No such conversation")
+                return
+            self.send_json({"deleted": conversation_id,
+                            "stats": store.chat_stats(user_id)})
+        finally:
+            store.close()
 
     def _read_json(self):
         length = int(self.headers.get('Content-Length', 0) or 0)
