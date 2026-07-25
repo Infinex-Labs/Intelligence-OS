@@ -29,10 +29,18 @@ detail.
 - **[Deployment](deployment.md)** — running it somewhere real, and what to lock
   down first.
 
+## Running it against real people
+
+- **[Responsible use](responsible-use.md)** — the obligations that land on you
+  as the deployer, by jurisdiction, and the checklist to work through before you
+  point it at anyone.
+- **[Licensing](licensing.md)** — this project is Apache-2.0, but a default
+  deployment is an AGPL-3.0 combined work. Read this before you sell anything
+  built on it.
+
 ## Reference
 
 - **[FAQ](faq.md)** — API keys, storage, RTSP, "why is nothing being detected".
-- **[Roadmap](../ROADMAP.md)** — what's next, and what we've decided not to build.
 - **[Contributing](../CONTRIBUTING.md)** · **[Security policy](../SECURITY.md)**
 
 ---

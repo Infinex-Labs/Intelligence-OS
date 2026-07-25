@@ -1,0 +1,52 @@
+Intelligence OS
+Copyright 2026 Infinex Labs
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at http://www.apache.org/licenses/LICENSE-2.0
+
+
+INTENDED USE
+------------
+Intelligence OS is a general-purpose, self-hosted tool for building a
+retrospective, correctable memory of what cameras you operate observed. It is
+intended for premises the operator is responsible for, with the knowledge of the
+people who enter them.
+
+It is not designed for, and the maintainers do not support, covert surveillance,
+tracking specific individuals without a lawful basis, or any deployment a
+person's safety depends on. It is retrospective by design and is not a safety
+interlock.
+
+Face recognition is disabled by default. Enabling it means processing biometric
+data, which carries obligations in most jurisdictions (GDPR Art. 9, the EU AI
+Act, the Illinois Biometric Information Privacy Act, and others). Responsibility
+for establishing a lawful basis, informing data subjects, and honouring their
+rights rests entirely with the party operating the software, not with the
+authors. See docs/responsible-use.md.
+
+
+THIRD-PARTY DEPENDENCY LICENCES
+-------------------------------
+This project's own source is Apache-2.0, but it does not run alone.
+
+  * ultralytics (YOLO, ByteTrack) is licensed AGPL-3.0, as are the model
+    weights distributed by that project. Ultralytics takes the position that an
+    application incorporating it must itself be AGPL-3.0, and offers a separate
+    commercial licence for cases where that is unacceptable.
+
+    Apache-2.0 and AGPL-3.0 are compatible in one direction only: Apache-2.0
+    code may be combined into an AGPL-3.0 work, but the resulting combination
+    must be distributed under AGPL-3.0. Because this project is normally run as
+    a network service, AGPL-3.0 section 13 is engaged for anyone offering it to
+    other users.
+
+    If you intend to deploy or distribute Intelligence OS commercially, obtain a
+    commercial licence from Ultralytics or substitute a permissively licensed
+    detector. See docs/licensing.md.
+
+  * opencv-python-headless — Apache-2.0
+  * PyYAML, anthropic — MIT
+  * psutil, lap — BSD
+  * numpy — BSD-3-Clause (with bundled components under other licences)
+  * insightface, onnxruntime (optional) — MIT

@@ -154,8 +154,14 @@ fields, not as magic numbers at the call site.
 
 **6. Privacy is a default, not a feature.** Face recognition ships **off**
 (`IdentityConfig.enabled = false`). Keyframes are pruned at
-`raw_retention_days`. `operator delete` cascades. Don't add anything that
-retains more than it needs to, or that turns an opt-in on for people.
+`raw_retention_days`. `operator delete` cascades. There is no audio capture, and
+there will not be. Don't add anything that retains more than it needs to, or
+that turns an opt-in on for people.
+
+A PR that changes what happens to someone who never read the docs — biometrics
+on by default, silently longer retention, weaker deletion — will be rejected on
+that basis alone. Adding capability is fine; changing the default is not. See
+[docs/responsible-use.md](docs/responsible-use.md#for-contributors).
 
 ---
 
@@ -192,3 +198,8 @@ Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 Contributions are accepted under the [Apache License 2.0](LICENSE), the same
 licence as the project. By opening a PR you confirm you have the right to submit
 the code under it. There is no CLA.
+
+**Don't paste in GPL or AGPL code** — including code an assistant produced by
+reproducing it. This repository's own source being cleanly Apache-2.0 is the one
+thing keeping the dependency situation in
+[docs/licensing.md](docs/licensing.md) as simple as it currently is.

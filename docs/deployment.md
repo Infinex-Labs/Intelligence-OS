@@ -5,8 +5,8 @@ you control, on a network you control."** It binds `127.0.0.1`, has no TLS, no
 CSRF tokens and no rate limiting. None of that is a secret — it is in
 [SECURITY.md](../SECURITY.md) — and it determines how you should run it.
 
-There is no Dockerfile yet ([roadmap](../ROADMAP.md)). A virtualenv plus a
-process supervisor is the supported path.
+There is no Dockerfile yet. A virtualenv plus a process supervisor is the
+supported path.
 
 ## Sizing
 
@@ -124,7 +124,11 @@ you would treat the original: full-disk encryption at minimum. The database is
 
 ## Before you point this at real people
 
-Not legal advice, but the checklist any deployment should be able to answer:
+The short form. **[Responsible use](responsible-use.md)** is the long form, with
+the jurisdiction-by-jurisdiction detail and the full checklist — read it before
+a deployment anyone but you can see.
+
+Not legal advice, but the questions any deployment should be able to answer:
 
 - **Do the people in frame know?** Signage is a legal requirement in many
   jurisdictions and a decency requirement everywhere.
@@ -138,7 +142,11 @@ Not legal advice, but the checklist any deployment should be able to answer:
   <entity_id>` cascades to signatures, observations and relations. Know how to
   do it before you're asked to.
 - **Who can see the dashboard?** Every signed-in operator can see the whole
-  graph. Role separation is on the roadmap; today, an account is full access.
+  graph. There is no role separation yet; today, an account is full access.
 
 This system is retrospective by design. It answers what happened. It is not a
 safety interlock and must not be deployed as one.
+
+**If you are deploying it for someone else, or as part of a product, also read
+[licensing](licensing.md)** — YOLO arrives under AGPL-3.0, and hosting the
+dashboard for other users engages its network clause.

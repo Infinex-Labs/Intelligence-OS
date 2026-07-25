@@ -118,4 +118,4 @@ to a stranger's.
   days. The assistant will tell you it saw nothing rather than guess.
 - **Question shapes are limited** to what the query tool can express: time
   window, zone, entity, predicate substring. Counting and comparison questions
-  are on the [roadmap](../ROADMAP.md).
+  are not supported yet.

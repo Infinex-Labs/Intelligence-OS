@@ -58,7 +58,7 @@ label "area: ui"          "1d76db" "Dashboard and web API"
 label "area: infra"       "1d76db" "Packaging, CI, deployment"
 
 echo "Resolution"
-label "wontfix"           "ffffff" "Deliberately not doing this — see ROADMAP.md"
+label "wontfix"           "ffffff" "Deliberately not doing this"
 label "duplicate"         "cfd3d7" "Already tracked elsewhere"
 
 echo

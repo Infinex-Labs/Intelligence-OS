@@ -12,7 +12,10 @@ description = "Turn camera streams into a correctable, evidence-backed memory gr
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+
+# NOTICE ships too: Apache-2.0 section 4(d) requires redistributors to carry it,
+# and it is where the ultralytics AGPL-3.0 situation is recorded.
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Infinex Labs" }]
 keywords = [
     "computer-vision", "video-understanding", "memory-graph", "surveillance",

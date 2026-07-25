@@ -6,10 +6,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please check [ROADMAP.md](https://github.com/Infinex-Labs/Intelligence-OS/blob/main/ROADMAP.md)
-        first — it lists both what's planned and what we've decided *not* to
-        build, with reasons. Both are worth arguing with, but it helps to know
-        which one you're arguing with.
+        Please check [what we will not build](https://github.com/Infinex-Labs/Intelligence-OS/blob/main/docs/responsible-use.md#what-we-will-not-build)
+        first — some directions are decided against on principle rather than on
+        priority, and the reasons are there. Worth arguing with, but it helps to
+        know you're arguing with a position rather than a backlog.
 
   - type: textarea
     id: problem

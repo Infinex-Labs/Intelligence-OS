@@ -73,6 +73,6 @@ your real people in your real lighting** — see [docs/tuning.md](../../docs/tun
 - **RTSP that won't connect.** The pinned `opencv-python-headless==4.10` ships
   `FFMPEG:YES`, which RTSP needs. Check the URL resolves with `ffprobe` first.
   A camera that refuses at startup currently takes its thread down for the life
-  of the process — retry-with-backoff is on the [roadmap](../../ROADMAP.md).
+  of the process — there is no retry-with-backoff yet.
 - **Never commit your `config.yaml`.** It has credentials in it. The root one is
   gitignored; this sample is redacted.

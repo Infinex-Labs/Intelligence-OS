@@ -34,7 +34,7 @@ what `0.1.0` will be.
   and an `intelligence-os` console script. `pip install -e .` then
   `intelligence-os --webcam 0` now works from any directory.
 - **Project documentation** — `docs/`, runnable `examples/`, `CONTRIBUTING.md`,
-  `SECURITY.md`, `ROADMAP.md`, issue and PR templates.
+  `SECURITY.md`, issue and PR templates.
 - **CI** — the test suite on Python 3.10/3.11/3.12 plus a `ruff` lint gate.
 - **Apache 2.0 licence.** The repository previously had no `LICENSE` file at
   all, which meant nobody could legally depend on it.

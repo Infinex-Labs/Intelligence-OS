@@ -18,7 +18,7 @@ when the mark changes.
 - **`demo.gif`** — 30–60 seconds showing the loop this project exists for: a
   question typed into the assistant, an answer, and the keyframes it cites.
   Nothing explains this system faster, and its absence is the biggest remaining
-  gap in the README. Tracked on the [roadmap](../ROADMAP.md).
+  gap in the README.
 - **`architecture.png`** — the cascade diagram in
   [docs/architecture.md](../docs/architecture.md) is ASCII today, which is
   readable and diffable but not what anyone screenshots.

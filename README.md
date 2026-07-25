@@ -12,7 +12,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-no%20cloud%20required-success.svg)](docs/installation.md)
 
-[Quick start](#quick-start) · [Docs](docs/) · [Examples](examples/) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Docs](docs/) · [Examples](examples/) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -244,6 +244,8 @@ python -m intelligence_os.phase1 tune --video enroll_clip.mp4
 | [HTTP API](docs/api.md) | Every endpoint the dashboard uses |
 | [Development](docs/development.md) | Dev loop, tests, schema rules |
 | [Deployment](docs/deployment.md) | Running it somewhere real |
+| [Responsible use](docs/responsible-use.md) | What lands on you as the deployer, by jurisdiction |
+| [Licensing](docs/licensing.md) | Apache-2.0 code, AGPL-3.0 detector — read before selling |
 | [FAQ](docs/faq.md) | Keys, storage, RTSP, "why is nothing detected" |
 
 ---
@@ -292,19 +294,36 @@ Four house rules worth knowing before you open a PR:
 
 ---
 
-## Privacy
+## Privacy and responsible use
 
 Not a footnote, a design constraint:
 
 - **Face recognition is opt-in** and ships off. Most rules, zones and alerts
-  work without it. Turning it on makes this a biometric system.
+  work without it. Turning it on makes this a biometric system — with the legal
+  weight that carries.
 - **Keyframes, not video**, pruned at `raw_retention_days` (default 7).
 - **Deletion cascades** and is meant to be irreversible.
+- **No audio, ever.** Deliberate: wiretap law is far harsher than
+  video-surveillance law, and a microphone would be the largest single increase
+  in risk this project could take.
 - **Nothing leaves the machine** unless you set an API key or configure a
   delivery channel. No telemetry, ever.
 
-Things we will not build are listed, with reasons, in the
-[roadmap](ROADMAP.md#explicitly-not-on-the-roadmap).
+Intelligence OS is meant for **premises you are responsible for, with the
+knowledge of the people who enter them.** If you run it against real people, you
+are the data controller — the authors never see your footage and cannot comply
+on your behalf. **[docs/responsible-use.md](docs/responsible-use.md)** has the
+pre-deployment checklist and what applies where (GDPR Art. 9, the EU AI Act,
+Illinois BIPA, India's DPDP Act).
+
+Never use an output of this system as the sole basis for an accusation or a
+decision affecting someone. Identity matching has a real error rate in both
+directions, and it does not fail uniformly across demographic groups. The graph
+is correctable precisely because it is expected to be wrong sometimes.
+
+Things we will not build — covert operation, emotion inference, real-time
+intervention — are listed with reasons in
+[responsible use](docs/responsible-use.md#what-we-will-not-build).
 
 ---
 
@@ -313,9 +332,17 @@ Things we will not build are listed, with reasons, in the
 - 💬 [Discussions](https://github.com/Infinex-Labs/Intelligence-OS/discussions) — questions, tuning advice, show and tell
 - 🐛 [Issues](https://github.com/Infinex-Labs/Intelligence-OS/issues) — bugs and feature requests
 - 🔒 [Security](SECURITY.md) — report privately, never in a public issue
-- 🗺️ [Roadmap](ROADMAP.md) · 📋 [Changelog](CHANGELOG.md)
+- 📋 [Changelog](CHANGELOG.md)
 
 ## License
 
 [Apache License 2.0](LICENSE) — commercial use, modification and distribution
 permitted, with an express patent grant. No CLA.
+
+One caveat worth knowing before you build a business on it: YOLO arrives via
+`ultralytics`, which is **AGPL-3.0**, so a default deployment is an AGPL-3.0
+combined work even though this repository's own source is Apache-2.0. Hosting
+the dashboard for other users engages AGPL §13. See
+**[docs/licensing.md](docs/licensing.md)** for the options — a permissively
+licensed detector backend would remove the constraint entirely, and is the
+highest-value contribution anyone could make here.

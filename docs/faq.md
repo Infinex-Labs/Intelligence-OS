@@ -11,7 +11,8 @@ summaries), the AI Assistant, and compiling rules from English.
 
 No. It keeps **keyframes plus the graph**, and prunes keyframes older than
 `raw_retention_days` (default 7). It is not a continuous archival system, and
-turning it into one is explicitly not on the [roadmap](../ROADMAP.md).
+turning it into one is something we've explicitly decided against — see
+[what we will not build](responsible-use.md#what-we-will-not-build).
 
 ### Why are all my entities called `entity_4`?
 
@@ -74,9 +75,9 @@ numbers — if you try it, [tell us](https://github.com/Infinex-Labs/Intelligenc
 
 ### Can I use a local model instead of Anthropic?
 
-Not yet. A pluggable detector/VLM backend is on the roadmap for Q4, with local
-VLMs (Ollama, llava) as the first consumer. Until then the VLM stage is
-hard-wired to Anthropic — but remember it is optional.
+Not yet. A pluggable detector/VLM backend is wanted — local VLMs (Ollama,
+llava) would be the first consumer — but it isn't built. Until then the VLM
+stage is hard-wired to Anthropic, and remember it is optional.
 
 ### How many cameras can it handle?
 
@@ -120,5 +121,6 @@ sure you have, rather than assuming you will.
 ### Why is there no `dist/` source in the repo?
 
 `intelligence_os/static/dist/` is a prebuilt bundle whose source isn't checked
-in. Editing it means editing the built asset. Bringing that source in is on the
-roadmap; the main dashboard (`home.html`) is hand-written and directly editable.
+in. Editing it means editing the built asset. Bringing that source into the
+repository is a known gap; the main dashboard (`home.html`) is hand-written and
+directly editable.
