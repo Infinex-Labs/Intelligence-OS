@@ -84,10 +84,12 @@ There is no paid bug bounty.
 These are documented properties of the current design, not bugs — but they
 determine how you should deploy it:
 
-1. **Bind address.** The server listens on `127.0.0.1`. It has no TLS, no rate
-   limiting, and no CSRF tokens. Put it behind a reverse proxy that terminates
-   TLS if it needs to be reachable from another machine. Do not expose it
-   directly to the internet.
+1. **Bind address.** The server listens on `127.0.0.1` by default, and that
+   default is load-bearing: there is no TLS, no rate limiting, and no CSRF
+   tokens. `--host` can widen it, and the Docker image sets `--host 0.0.0.0`
+   because a container's network namespace is its boundary — but the published
+   port there still goes to the host's loopback. Anywhere else, put it behind a
+   reverse proxy that terminates TLS. Do not expose it directly to the internet.
 2. **`config.yaml` holds credentials.** RTSP URLs commonly embed a username and
    password. The file is gitignored for that reason. Keep it that way.
 3. **The database is not encrypted at rest.** `memory.db` and the retained

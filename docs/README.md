@@ -5,6 +5,8 @@ detail.
 
 ## Getting started
 
+- **[Docker](docker.md)** — the shortest path if you want to *run* this rather
+  than develop it. One image, one volume, and notes on cloud instances.
 - **[Installation](installation.md)** — dependencies, what each optional extra
   unlocks, and why the first boot is slow.
 - **[Configuration](configuration.md)** — `config.yaml`, every tunable in

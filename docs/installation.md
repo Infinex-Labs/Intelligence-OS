@@ -1,7 +1,11 @@
 # Installation
 
-Requires **Python 3.10+**. No Docker image yet — a virtualenv is the supported
-path today. macOS and Linux are what it is developed on.
+Requires **Python 3.10+**. macOS and Linux are what it is developed on.
+
+If you only want to *run* this, **[Docker](docker.md)** is the shorter path —
+`docker compose up -d` and nothing on this page applies. Everything below is for
+a local Python environment, which is what you want if you intend to change the
+code.
 
 ## The short version
 

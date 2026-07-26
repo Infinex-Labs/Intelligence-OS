@@ -2,7 +2,8 @@
 
 Everything the dashboard does, it does over this API — there is no privileged
 private channel. It is served by `intelligence_os/web.py` on the stdlib
-`http.server`, and it binds `127.0.0.1` by default.
+`http.server`, and it binds `127.0.0.1` by default (`--host` widens it; see
+[docker](docker.md) for the one case where that's the right call).
 
 ## Authentication
 

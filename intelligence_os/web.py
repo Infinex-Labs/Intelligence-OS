@@ -1777,6 +1777,14 @@ def main(argv=None):
     p.add_argument("--show", dest="show", action="store_true", default=None)
     p.add_argument("--no-show", dest="show", action="store_false")
     p.add_argument("--port", type=int, default=8000)
+    # Stays 127.0.0.1 by default: there is no TLS, no CSRF token and no rate
+    # limiting on login, so the loopback interface is doing real work as a
+    # boundary. Containers are the honest exception — the network namespace is
+    # the boundary there, and a container that binds loopback is unreachable
+    # even from its own published port — so the image passes --host 0.0.0.0 and
+    # publishes to 127.0.0.1 on the host instead. See docs/docker.md.
+    p.add_argument("--host", type=str, default="127.0.0.1",
+                   help="interface to bind (default 127.0.0.1; use 0.0.0.0 in a container)")
 
     args = p.parse_args(argv)
     from intelligence_os.run import resolve_source
@@ -1789,8 +1797,12 @@ def main(argv=None):
     t = threading.Thread(target=start_pipeline, args=(args,), daemon=True)
     t.start()
 
-    server = ThreadedHTTPServer(('127.0.0.1', args.port), RequestHandler)
-    print(f"Starting Intelligence OS Web Server at http://localhost:{args.port} ...")
+    server = ThreadedHTTPServer((args.host, args.port), RequestHandler)
+    shown = "localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host
+    print(f"Starting Intelligence OS Web Server at http://{shown}:{args.port} ...")
+    if args.host != "127.0.0.1":
+        print(f"  Bound to {args.host} — anything that can reach this interface can reach "
+              f"the dashboard. Put TLS and access control in front of it.")
     server.serve_forever()
 
 

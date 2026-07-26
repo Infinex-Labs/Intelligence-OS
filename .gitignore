@@ -191,3 +191,5 @@ intelligence_os/data/
 # UI-written settings — holds camera RTSP URLs, which carry credentials.
 # Anchored to the repo root so the redacted sample in examples/ still ships.
 /config.yaml
+.design-sync
+ds-bundle

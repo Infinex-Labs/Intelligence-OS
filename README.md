@@ -83,6 +83,19 @@ First visit asks you to create a login. The dashboard gives you the live feed,
 Alerts, Timeline, the AI Assistant, Rules and Reports.
 
 <details>
+<summary><b>Just want to run it? Use Docker.</b></summary>
+
+```bash
+docker compose up -d          # → http://localhost:8000
+```
+
+No Python environment, no dependency pinning. State lives in one volume, and
+the port publishes to the host's loopback so it isn't exposed by accident.
+Full guide, including EC2 and other cloud instances: **[docs/docker.md](docs/docker.md)**.
+
+</details>
+
+<details>
 <summary><b>Only got two minutes? Skip the camera entirely.</b></summary>
 
 ```bash

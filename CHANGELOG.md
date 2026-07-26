@@ -33,6 +33,12 @@ what `0.1.0` will be.
 - **Packaging.** `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`,
   and an `intelligence-os` console script. `pip install -e .` then
   `intelligence-os --webcam 0` now works from any directory.
+- **Docker.** A two-stage `Dockerfile` and `docker-compose.yml` for people who
+  want to run this rather than develop it — CPU-only torch, non-root, all state
+  in one `/data` volume, and a healthcheck. `docker compose up -d` is the whole
+  install. See [docs/docker.md](docs/docker.md).
+- **`--host` flag** on the web server. Still `127.0.0.1` by default; the
+  container sets `0.0.0.0` because a network namespace is its own boundary.
 - **Project documentation** — `docs/`, runnable `examples/`, `CONTRIBUTING.md`,
   `SECURITY.md`, issue and PR templates.
 - **CI** — the test suite on Python 3.10/3.11/3.12 plus a `ruff` lint gate.

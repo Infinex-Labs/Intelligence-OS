@@ -1,0 +1,42 @@
+# Keep the build context small and, more importantly, keep secrets and local
+# state out of it. Anything listed here is invisible to `docker build`.
+
+# Local runtime state — the container has its own /data volume. Copying a host
+# database in would also copy its face embeddings into an image layer.
+intelligence_os/data/
+intelligence_os/.env
+
+# RTSP URLs with credentials in them. Mount this at runtime, never bake it in.
+/config.yaml
+
+# Model weights: ~40 MB that the container fetches itself on first run. Baking
+# them in would also bake in the AGPL-licensed Ultralytics weights (see
+# docs/licensing.md), which changes what you are allowed to redistribute.
+*.pt
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.git/
+.github/
+.gitignore
+
+docs/
+examples/
+assets/
+scripts/
+tests/
+intelligence_os/tests/
+
+*.md
+!README.md
+
+build/
+dist/
+*.egg-info/
+
+.DS_Store

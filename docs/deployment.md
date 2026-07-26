@@ -5,8 +5,9 @@ you control, on a network you control."** It binds `127.0.0.1`, has no TLS, no
 CSRF tokens and no rate limiting. None of that is a secret — it is in
 [SECURITY.md](../SECURITY.md) — and it determines how you should run it.
 
-There is no Dockerfile yet. A virtualenv plus a process supervisor is the
-supported path.
+Two supported paths: **[Docker](docker.md)** (shortest, and what most people
+should use) or a virtualenv plus a process supervisor, documented below. The
+lock-down advice on this page applies to both.
 
 ## Sizing
 

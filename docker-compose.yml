@@ -1,0 +1,60 @@
+# Intelligence OS — single-node deployment.
+#
+#   docker compose up -d          # build and start
+#   docker compose logs -f        # watch the first-run weight download
+#   docker compose down           # stop; the named volume survives
+#
+# Then open http://localhost:8000 and create the first account.
+
+services:
+  intelligence-os:
+    build: .
+    image: intelligence-os:latest
+    container_name: intelligence-os
+    restart: unless-stopped
+
+    ports:
+      # Bound to the host's loopback deliberately. Change this to "8000:8000"
+      # and the dashboard is on every interface of the box — no TLS, no rate
+      # limiting on login. On a cloud instance, reach it over an SSH tunnel:
+      #   ssh -L 8000:localhost:8000 user@your-host
+      # or put a TLS-terminating proxy in front. See docs/deployment.md.
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      # Database, keyframes, config.yaml and the downloaded YOLO weights.
+      # This is the only state that matters — back this up, and treat it as
+      # sensitive: it contains face embeddings if identity is enabled.
+      - io-data:/data
+
+      # Reading video files instead of a camera? Drop them in ./media and use
+      # source: /media/clip.mp4 in config.yaml.
+      # - ./media:/media:ro
+
+    environment:
+      # Stage F (scene descriptions) is optional and off without a key. Set it
+      # in a .env file next to this one rather than inline here.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+    # YOLO is the expensive stage. Without a ceiling one busy camera will happily
+    # take the whole box; tune to your instance rather than trusting these.
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+
+    # A USB webcam on a Linux host. Does not work on Docker Desktop for macOS or
+    # Windows — there is no device passthrough there, so use RTSP or a video
+    # file on those. RTSP needs nothing here beyond network access.
+    # devices:
+    #   - "/dev/video0:/dev/video0"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  io-data:

@@ -9,6 +9,18 @@ numpy<2
 
 # 4.10 ships FFMPEG:YES, which RTSP needs. Do not float this to 5.x without
 # checking `cv2.getBuildInformation()` for FFMPEG support first.
+#
+# CAVEAT: ultralytics depends on `opencv-python` — the GUI build — so pip will
+# install that too, over the top of this one. Both unpack into the same `cv2/`
+# directory, so this pin does not actually win; check with `python -c "import
+# cv2; print(cv2.__version__)"`. It has been benign so far (the GUI build also
+# ships FFMPEG:YES), but it is a collision, not a plan. To get a single clean
+# headless install:
+#
+#   pip uninstall -y opencv-python opencv-python-headless
+#   pip install "opencv-python-headless==4.10.*"
+#
+# The Dockerfile does exactly that, and asserts the result.
 opencv-python-headless==4.10.*
 
 PyYAML>=6.0
