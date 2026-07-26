@@ -10,6 +10,7 @@ loop outright — frames=0, silently, in a thread nobody was watching.
 from __future__ import annotations
 
 import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
@@ -57,8 +58,22 @@ class TestStoreAcrossThreads(unittest.TestCase):
 
     def test_the_module_is_serialized(self):
         """Sharing one handle is only safe because sqlite3 serializes access.
-        If a build ever ships threadsafety < 3 this fails here, not at 3am."""
-        self.assertEqual(sqlite3.threadsafety, 3)
+        If a build ever ships an unserialized SQLite this fails here, not at 3am.
+
+        We ask the library, not the DB-API attribute: `sqlite3.threadsafety` is
+        hardcoded to 1 on Python <= 3.10 and only started reflecting the real
+        SQLITE_THREADSAFE build mode in 3.11, so asserting == 3 fails on 3.10
+        against a perfectly serialized build. `PRAGMA compile_options` reports
+        the compiled-in mode on every version: THREADSAFE=1 is serialized,
+        THREADSAFE=2 is multi-thread (one connection per thread), 0 is single.
+        """
+        opts = [r[0] for r in self.store.conn.execute("PRAGMA compile_options")]
+        mode = next((o.split("=")[1] for o in opts if o.startswith("THREADSAFE=")), "absent")
+        self.assertEqual(mode, "1", f"SQLite is not serialized (THREADSAFE={mode})")
+
+        # Where the interpreter can corroborate it, it must agree.
+        if sys.version_info >= (3, 11):
+            self.assertEqual(sqlite3.threadsafety, 3)
 
 
 if __name__ == "__main__":

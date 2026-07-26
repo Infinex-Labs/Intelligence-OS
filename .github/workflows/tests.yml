@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a PR supersedes the run in flight — no point burning minutes
+  # on a commit nobody is waiting for any more.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # requirements-dev.txt, NOT requirements.txt: the suite is offline and
+      # stubs the heavy optional deps (intelligence_os/tests/_stubs.py), so CI
+      # does not download torch to check the memory graph. Three packages,
+      # ~30 seconds. Verified locally: 110/110 pass with exactly these.
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Check the package imports as installed
+        run: |
+          pip install -e . --no-deps
+          python -c "import intelligence_os; print(intelligence_os.__version__)"
+
+      # The two acceptance gates, run first and named, so a red build says what
+      # broke instead of scrolling past 108 dots.
+      - name: Acceptance gate — identity and correctness
+        run: python -m intelligence_os.tests.test_foundation
+
+      - name: Acceptance gate — scene state to distillation
+        run: python -m intelligence_os.tests.test_pipeline
+
+      - name: Full suite
+        run: python -m unittest discover -s intelligence_os/tests -t . -v

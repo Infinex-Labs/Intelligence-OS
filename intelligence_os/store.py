@@ -24,7 +24,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -206,8 +206,10 @@ class Store:
             self.db_path = str(db_path)
         # run.py builds ONE Store on the main thread and hands it to every camera
         # thread and to the shared resolvers, so the connection has to outlive its
-        # creating thread. sqlite3.threadsafety == 3 (serialized) on every build we
-        # ship on, which is what makes sharing the handle safe; WAL below is about
+        # creating thread. SQLite is compiled SQLITE_THREADSAFE=1 (serialized) on
+        # every build we ship on, which is what makes sharing the handle safe --
+        # test_store_threads asserts it via PRAGMA compile_options, because the
+        # sqlite3.threadsafety attribute only reports the real mode on 3.11+; WAL below is about
         # concurrent *connections* (the web server opens its own per request) and
         # never covered this.
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)

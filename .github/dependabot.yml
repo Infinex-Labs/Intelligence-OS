@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Monthly, grouped, and capped: this project pins numpy<2 and
+  # opencv-python-headless==4.10.* on purpose (ABI and FFMPEG support), so a
+  # firehose of dependency PRs would mostly be PRs we close. See the comments
+  # in requirements.txt before accepting a bump to either.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: numpy
+        versions: [">=2.0"]
+      - dependency-name: opencv-python-headless
+        versions: [">=4.11"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

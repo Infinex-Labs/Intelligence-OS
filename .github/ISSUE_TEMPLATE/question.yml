@@ -1,0 +1,35 @@
+name: Question
+description: You're stuck on setup, tuning, or how something is meant to work
+title: "[question] "
+labels: ["question", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions are welcome. Two shortcuts that answer most of them:
+
+        - [docs/installation.md](https://github.com/Infinex-Labs/Intelligence-OS/blob/main/docs/installation.md) — first boot is slow because models download; that's not a hang.
+        - [docs/faq.md](https://github.com/Infinex-Labs/Intelligence-OS/blob/main/docs/faq.md) — RTSP, API keys, retention, "why is nothing being detected".
+
+        Open-ended discussion fits better in [Discussions](https://github.com/Infinex-Labs/Intelligence-OS/discussions);
+        use this template when you think you may have hit a real wall.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you've tried
+      description: Commands you ran and what came back. Redact credentials in RTSP URLs.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "0.1.0 (a1b2c3d)"

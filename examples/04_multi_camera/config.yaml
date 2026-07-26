@@ -1,0 +1,41 @@
+# Sample multi-camera config. Copy to the REPO ROOT as `config.yaml`
+# (or point INTELLIGENCE_OS_CONFIG at it) and edit.
+#
+#   cp examples/04_multi_camera/config.yaml ./config.yaml
+#
+# ⚠️  The real config.yaml is gitignored on purpose: RTSP URLs almost always
+# embed a username and password. Never commit yours, and redact it before
+# pasting it into an issue.
+
+cameras:
+  # Camera names must be UNIQUE. A duplicate is a boot error, not a silent
+  # overwrite — two cameras quietly sharing a name would corrupt the graph's
+  # sense of where things happened.
+  - name: front_door
+    source: "rtsp://user:pass@10.0.0.5:554/stream1"
+
+  - name: back_yard
+    source: "rtsp://user:pass@10.0.0.6:554/stream1"
+
+  # A local webcam is an integer, not a string.
+  - name: workshop
+    source: 0
+
+  # A file works too, and replays through the identical pipeline — handy for
+  # developing a multi-camera setup with only one real camera.
+  # - name: replay
+  #   source: "examples/03_video_pipeline/clip.mp4"
+
+# Zones are per-camera (frame geometry is per-camera). Draw them in the UI, or
+# supply a file like zones.json in this directory.
+zones: examples/04_multi_camera/zones.json
+
+# Face identity is OFF by default, and that is a deliberate privacy default
+# rather than an oversight. Turning it on is what fuses cameras into one
+# picture — see the README next to this file. Tune the threshold on your own
+# footage before you trust anything that depends on it.
+face_matching: false
+
+# How eagerly the VLM description stage fires: lazy | balanced | eager.
+# Only relevant when ANTHROPIC_API_KEY is set. Each call costs money.
+sensitivity: balanced

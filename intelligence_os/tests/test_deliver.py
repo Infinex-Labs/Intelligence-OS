@@ -27,7 +27,7 @@ class TestDelivery(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_memory.db"
         self.store = Store(db_path=self.db_path)
-        
+
         # Create a test user in DB
         with self.store.tx() as c:
             c.execute(
@@ -86,7 +86,7 @@ class TestDelivery(unittest.TestCase):
             self.assertTrue(smtp_instance.sendmail.called)
             from_addr, to_addrs, msg_str = smtp_instance.sendmail.call_args[0]
             self.assertEqual(to_addrs, ["user@test.com"])
-            
+
             # Message should contain the inline CID header and the content-type boundary
             self.assertIn("Content-ID: <", msg_str)
             self.assertIn("Content-Disposition: inline", msg_str)
@@ -115,7 +115,7 @@ class TestDelivery(unittest.TestCase):
         # Update user to realtime schedule
         with self.store.tx() as c:
             c.execute("UPDATE users SET delivery_schedule = 'realtime', delivery_sink = 'email'")
-            
+
         event = FiredEvent(
             rule="test_rule",
             entity_id="ent_person_123",
@@ -124,10 +124,10 @@ class TestDelivery(unittest.TestCase):
             keyframe="",
             timestamp=9999.0
         )
-        
+
         deliver_realtime_event(self.store, event)
         self.assertTrue(mock_send_email.called)
-        
+
         # Verify call args
         args, kwargs = mock_send_email.call_args
         to_email, subject, html_body, text_body, kf = args
@@ -138,7 +138,7 @@ class TestDelivery(unittest.TestCase):
     @patch("intelligence_os.deliver.deliver_digest")
     def test_scheduler_loop_ticks(self, mock_deliver_digest):
         mock_deliver_digest.return_value = True
-        
+
         # 1. Test scheduler tick when time is not 08:00 AM local
         # mock local hour to 12:00 PM (tm_hour=12)
         local_time_mock = MagicMock()
@@ -152,7 +152,7 @@ class TestDelivery(unittest.TestCase):
         with patch("time.localtime", return_value=local_time_mock):
             run_scheduler_tick(self.store, now=100000.0)
             self.assertTrue(mock_deliver_digest.called)
-            
+
             # Check user table has last_delivered_at updated to now
             user = self.store.conn.execute("SELECT * FROM users").fetchone()
             self.assertEqual(user["last_delivered_at"], 100000.0)

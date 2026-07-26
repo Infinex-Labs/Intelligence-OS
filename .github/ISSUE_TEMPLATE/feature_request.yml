@@ -1,0 +1,74 @@
+name: Feature request
+description: Propose something the system should be able to do
+title: "[feat] "
+labels: ["enhancement", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [what we will not build](https://github.com/Infinex-Labs/Intelligence-OS/blob/main/docs/responsible-use.md#what-we-will-not-build)
+        first — some directions are decided against on principle rather than on
+        priority, and the reasons are there. Worth arguing with, but it helps to
+        know you're arguing with a position rather than a backlog.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What can't you do today? Describe the situation, not the solution —
+        the best feature is often not the one first imagined.
+      placeholder: >
+        I run four cameras across a workshop and I can't tell whether a person
+        who appears on camera 3 is the same person who left camera 1, because
+        the timeline is per-camera.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like to happen
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Memory graph / schema (store.py)
+        - Identity and re-id
+        - Detection / tracking
+        - VLM and descriptions
+        - Distillation (habits, relations, events)
+        - Ask / natural-language queries
+        - Rules and alerting
+        - Delivery channels (email, webhook, chat)
+        - Web UI
+        - Packaging, deployment, docs
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "I tried X and it nearly worked, except…".
+
+  - type: textarea
+    id: provenance
+    attributes:
+      label: How would this stay traceable?
+      description: >
+        Only relevant if your feature produces a new kind of claim (a new
+        alert, inference, or answer). Every claim in this system has to be
+        walkable back down to the observations and keyframes that produced it —
+        how would yours be? Leave blank if it doesn't apply.
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Would you like to build it?
+      options:
+        - label: I'd be willing to open a PR for this

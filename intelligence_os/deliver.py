@@ -376,25 +376,25 @@ def deliver_digest(store: Store, user: dict, since: float, now: float) -> bool:
     """Build the digest briefing for a user and send it via the configured sink."""
     d = build_digest(store, since=since, now=now)
     dest = user.get("delivery_destination") or user.get("email") or user.get("username")
-    
+
     if user.get("delivery_sink") == "email":
         if not dest or "@" not in dest:
             logger.warning(f"No valid email destination for user {user['username']}")
             return False
-            
+
         subject = f"Intelligence OS digest brief: {time.strftime('%a %d %b')}"
         from intelligence_os.digest import render_text
         text_body = render_text(d)
         html_body = render_html(d)
-        
+
         # Collect keyframe paths
         kfs = []
         for i in d.get("rule_fired", []) + d.get("unusual", []):
             if i.get("keyframe"):
                 kfs.append(i["keyframe"])
-                
+
         return send_email(dest, subject, html_body, text_body, kfs)
-        
+
     elif user.get("delivery_sink") == "webhook":
         if not dest or not dest.startswith(("http://", "https://")):
             logger.warning(f"No valid webhook destination URL for user {user['username']}")
@@ -421,17 +421,17 @@ def deliver_realtime_event(store: Store, event) -> None:
     users = store.conn.execute(
         "SELECT * FROM users WHERE delivery_schedule = 'realtime'"
     ).fetchall()
-    
+
     for u in users:
         u_dict = dict(u)
         dest = u_dict.get("delivery_destination") or u_dict.get("email") or u_dict.get("username")
-        
+
         if u_dict.get("delivery_sink") == "email":
             if not dest or "@" not in dest:
                 continue
             subject = f"[ALERT] Intelligence OS: {event.rule} fired"
             text_body = f"Rule fired: {event.rule}\nEntity: {event.entity_id}\nTimestamp: {time.ctime(event.timestamp)}\nLocation: {event.location_id}\n"
-            
+
             html_body = f"""
             <html>
             <body>
@@ -447,7 +447,7 @@ def deliver_realtime_event(store: Store, event) -> None:
             </html>
             """
             send_email(dest, subject, html_body, text_body, [event.keyframe] if event.keyframe else [])
-            
+
         elif u_dict.get("delivery_sink") == "webhook":
             if not dest or not dest.startswith(("http://", "https://")):
                 continue
@@ -477,19 +477,19 @@ def run_scheduler_tick(store: Store, now: float) -> None:
     """Run one tick of the scheduled digest checking loop."""
     local_time = time.localtime(now)
     hour = local_time.tm_hour
-    
+
     users = store.conn.execute(
         "SELECT * FROM users WHERE delivery_schedule IN ('daily', 'twice_daily')"
     ).fetchall()
-    
+
     for u in users:
         u_dict = dict(u)
         sched = u_dict.get("delivery_schedule")
         last_t = u_dict.get("last_delivered_at") or 0.0
-        
+
         due = False
         since = now - 24 * 3600
-        
+
         if sched == "daily":
             # Fire at 08:00 AM local time
             if hour == 8 and (now - last_t) >= 12 * 3600:
@@ -500,7 +500,7 @@ def run_scheduler_tick(store: Store, now: float) -> None:
             if hour in (8, 20) and (now - last_t) >= 6 * 3600:
                 due = True
                 since = now - 12 * 3600
-                
+
         if due:
             logger.info(f"Running scheduled delivery ({sched}) for user: {u_dict['username']}")
             success = False
@@ -508,7 +508,7 @@ def run_scheduler_tick(store: Store, now: float) -> None:
                 success = deliver_digest(store, u_dict, since=since, now=now)
             except Exception as e:
                 logger.error(f"Error during digest delivery for {u_dict['username']}: {e}")
-                
+
             # Update delivery timestamp so we don't double fire in the same hour window
             with store.tx() as c:
                 c.execute(
@@ -530,7 +530,7 @@ def start_scheduler_thread() -> None:
                 logger.error(f"Scheduler tick failed: {e}")
             finally:
                 store.close()
-                
+
     import threading
     t = threading.Thread(target=loop, name="delivery-scheduler", daemon=True)
     t.start()
