@@ -133,6 +133,9 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# ruff
+.ruff_cache/
 .dmypy.json
 dmypy.json
 
@@ -180,9 +183,13 @@ Thumbs.db
 *.avi
 *.mkv
 *.mov
-intelligence_os/data/frames/*
-docs
-data
+# The runtime data dir (DB + retained keyframes + rules). Anchored with a
+# leading path, not a bare `data`: a bare name matches every directory of that
+# name at any depth, which is how the published `docs/` used to get ignored.
+intelligence_os/data/
 
-# UI-written settings — holds camera RTSP URLs, which carry credentials
-config.yaml
+# UI-written settings — holds camera RTSP URLs, which carry credentials.
+# Anchored to the repo root so the redacted sample in examples/ still ships.
+/config.yaml
+.design-sync
+ds-bundle

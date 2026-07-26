@@ -9,7 +9,7 @@ Objects become entities too, and are mergeable/splittable like people.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import cv2

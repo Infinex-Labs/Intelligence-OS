@@ -12,8 +12,13 @@ from typing import Optional
 
 import cv2
 from intelligence_os.store import Store
-from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG
+from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG, ROOT
 from intelligence_os.run import run as run_pipeline
+
+# Anchored to the package, not the working directory: an installed console
+# script starts wherever the user happens to be, and a UI that 404s unless you
+# cd to the repo root isn't installable.
+STATIC_DIR = str(ROOT / 'static')
 
 # M6: per-camera frame buffers (keyed by camera name)
 latest_frames: dict[str, bytes] = {}   # cam_name -> JPEG bytes
@@ -161,7 +166,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path_clean = self.path.split('?', 1)[0]
-        
+
         # 1. Determine if resource is publicly accessible
         is_public = (
             path_clean in ('/static/login.html', '/static/style.css',
@@ -171,13 +176,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                            '/api/auth/status') or
             path_clean.startswith('/static/vendor/')
         )
-        
+
         # 2. Onboarding/first-run check
         first_run = self.is_first_run()
-        
+
         # 3. User session check
         user_id = self.check_auth()
-        
+
         # 4. Redirect or block unauthenticated clients
         if not user_id and not is_public:
             if self.path.startswith('/api/'):
@@ -185,7 +190,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self.redirect_to_login()
             return
-            
+
         self.current_user_id = user_id      # M6: settings marks which row is you
 
         # 5. Prevent logged-in users from seeing login screen
@@ -196,7 +201,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         # 6. Route requests
         if self.path == '/':
             # the whole app, graph pane included (FR-NG-6: no separate graph URL)
-            self.serve_static('intelligence_os/static/home.html', 'text/html')
+            self.serve_static(os.path.join(STATIC_DIR, 'home.html'), 'text/html')
         elif self.path == '/api/auth/status':
             username = None
             delivery_schedule = "off"
@@ -226,7 +231,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             from intelligence_os.rules import load_rules
             self.send_json({"rules": load_rules()})
         elif self.path.startswith('/static/'):
-            static_root = os.path.realpath('intelligence_os/static')
+            static_root = os.path.realpath(STATIC_DIR)
             rel = self.path[len('/static/'):].split('?', 1)[0]
             candidate = os.path.realpath(os.path.join(static_root, rel))
             # containment check: reject any path that escapes static_root (../, symlinks)
@@ -271,6 +276,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.serve_entities()
         elif self.path == '/api/graph':
             self.serve_graph()
+        elif path_clean == '/api/chats':
+            self.serve_chats()
+        elif path_clean.startswith('/api/chats/'):
+            self.serve_chat(path_clean[len('/api/chats/'):])
         elif self.path == '/api/stats':
             self.serve_stats()
         elif self.path.startswith('/api/digest'):
@@ -282,7 +291,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         first_run = self.is_first_run()
         user_id = self.check_auth()
         path_clean = self.path.split('?', 1)[0]
-        
+
         # Public post routes
         if path_clean == '/api/auth/register':
             if not first_run:
@@ -296,12 +305,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self.serve_login()
             return
-            
+
         # Protected post routes
         if not user_id:
             self.send_error_json(401, "Unauthorized")
             return
-            
+
         # Attach current authenticated user id to handler instance for attribution
         self.current_user_id = user_id
 
@@ -311,6 +320,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.serve_camera_toggle()
         elif self.path == '/api/ask':
             self.serve_ask()
+        elif path_clean == '/api/chats':
+            self.serve_chat_create()
+        elif path_clean.startswith('/api/chats/') and path_clean.endswith('/rename'):
+            self.serve_chat_rename(path_clean[len('/api/chats/'):-len('/rename')])
+        elif path_clean.startswith('/api/chats/') and path_clean.endswith('/delete'):
+            self.serve_chat_delete(path_clean[len('/api/chats/'):-len('/delete')])
         elif self.path == '/api/digest/feedback':
             self.serve_digest_feedback()
         elif self.path.startswith('/api/rules/') and self.path.endswith('/toggle'):
@@ -896,22 +911,142 @@ class RequestHandler(BaseHTTPRequestHandler):
         set_rule_enabled(name, new)
         self.send_json({"name": name, "enabled": new})
 
+    @staticmethod
+    def _ask_counts(result: dict) -> dict:
+        """The four numbers every answer is measured by, counted off the evidence
+        itself — nothing here is a running total the UI could drift from."""
+        ents = result.get('entities') or []
+        return {
+            "entities": len(ents),
+            "observations": int(result.get('total_observations') or 0),
+            "keyframes": sum(len(e.get('keyframes') or []) for e in ents),
+            "rule_events": sum(len(e.get('rule_events') or []) for e in ents),
+        }
+
     def serve_ask(self):
         """Grounded query (§8.2): LLM parses the question, every fact in the
-        response is aggregated from observation rows. Query trace included."""
+        response is aggregated from observation rows. Query trace included.
+
+        The turn is appended to a conversation (V4-M10) so the thread survives a
+        reload, and the follow-up history is read back out of that thread rather
+        than trusted from the client."""
         body = self._read_json()
         question = (body.get('question') or '').strip()
         if not question:
             self.send_error(400, "question required")
             return
-        history = body.get('history')
-        if not isinstance(history, list):      # client-supplied; ask() clamps depth
-            history = None
-        from intelligence_os.ask import ask
+        user_id = getattr(self, 'current_user_id', None)
+        cid = (body.get('conversation_id') or '').strip() or None
+        store = Store()
         try:
-            self.send_json(ask(question, history=history))
-        except RuntimeError as e:
-            self.send_json({"error": str(e)})
+            # deleted while the question was in flight, or never this operator's
+            # to append to — either way the answer opens a thread of their own
+            if cid and not store.get_conversation(cid, user_id):
+                cid = None
+            fresh = cid is None
+            if fresh:
+                cid = store.create_conversation(user_id=user_id)
+            history = [{"q": t["question"], "a": t["answer"] or ""}
+                       for t in store.conversation_turns(cid)]
+            from intelligence_os.ask import ask
+            started = time.time()
+            try:
+                result = ask(question, store=store, history=history)
+            except RuntimeError as e:
+                # nothing was answered, so don't leave a titleless empty thread
+                # sitting in the sidebar — only the thread we just opened goes
+                if fresh:
+                    store.delete_conversation(cid)
+                    cid = None
+                self.send_json({"error": str(e), "conversation_id": cid})
+                return
+            result["conversation_id"] = cid
+            result["latency_ms"] = round((time.time() - started) * 1000)
+            result["counts"] = self._ask_counts(result)
+            # stored as rendered: reopening the thread replays this answer, it
+            # does not re-run the query against a memory that has moved on
+            turn_id = store.add_chat_turn_owned(
+                cid, user_id, question, result.get("answer"), json.dumps(result),
+                result["latency_ms"], counts=result["counts"])
+            row = store.get_conversation(cid, user_id)
+            result["turn_id"] = turn_id
+            result["conversation_title"] = row["title"] if row else None
+            result["stats"] = store.chat_stats(user_id)
+            self.send_json(result)
+        finally:
+            store.close()
+
+    def serve_chats(self):
+        """Sidebar payload: the thread list plus the KPI aggregate, one round trip."""
+        user_id = getattr(self, 'current_user_id', None)
+        store = Store()
+        try:
+            self.send_json({
+                "conversations": [dict(r) for r in store.conversations(user_id)],
+                "stats": store.chat_stats(user_id),
+            })
+        finally:
+            store.close()
+
+    def serve_chat(self, conversation_id):
+        """One thread, with each turn's stored evidence payload re-attached."""
+        store = Store()
+        try:
+            row = store.get_conversation(conversation_id,
+                                         getattr(self, 'current_user_id', None))
+            if not row:
+                self.send_error_json(404, "No such conversation")
+                return
+            turns = []
+            for t in store.conversation_turns(conversation_id):
+                d = dict(t)
+                try:
+                    d["payload"] = json.loads(t["payload"]) if t["payload"] else None
+                except ValueError:
+                    d["payload"] = None      # a truncated row must not break the thread
+                turns.append(d)
+            self.send_json({"conversation": dict(row), "turns": turns})
+        finally:
+            store.close()
+
+    def serve_chat_create(self):
+        store = Store()
+        try:
+            cid = store.create_conversation(
+                (self._read_json().get('title') or '').strip() or None,
+                user_id=getattr(self, 'current_user_id', None))
+            self.send_json({"conversation": dict(store.get_conversation(cid))})
+        finally:
+            store.close()
+
+    def serve_chat_rename(self, conversation_id):
+        title = (self._read_json().get('title') or '').strip()
+        if not title:
+            self.send_error_json(400, "title required")
+            return
+        user_id = getattr(self, 'current_user_id', None)
+        store = Store()
+        try:
+            # scoped: another operator's thread is a 404, not a rename
+            if not store.rename_conversation(conversation_id, title, user_id):
+                self.send_error_json(404, "No such conversation")
+                return
+            self.send_json({"conversation":
+                            dict(store.get_conversation(conversation_id, user_id))})
+        finally:
+            store.close()
+
+    def serve_chat_delete(self, conversation_id):
+        user_id = getattr(self, 'current_user_id', None)
+        store = Store()
+        try:
+            if not store.delete_conversation(conversation_id, user_id):
+                self.send_error_json(404, "No such conversation")
+                return
+            self.send_json({"deleted": conversation_id,
+                            "stats": store.chat_stats(user_id)})
+        finally:
+            store.close()
 
     def _read_json(self):
         length = int(self.headers.get('Content-Length', 0) or 0)
@@ -1519,10 +1654,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             total_persons = c.execute("SELECT COUNT(*) FROM entities WHERE type='person' AND status='active'").fetchone()[0]
             total_objects = c.execute("SELECT COUNT(*) FROM entities WHERE type='object' AND status='active'").fetchone()[0]
             total_obs = c.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
-            
+
             cutoff = time.time() - (24 * 3600)
             rows = c.execute("""
-                SELECT 
+                SELECT
                     CAST(timestamp / 3600 AS INT) * 3600 as hour,
                     COUNT(*) as count
                 FROM observations
@@ -1530,7 +1665,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 GROUP BY hour
                 ORDER BY hour ASC
             """, (cutoff,)).fetchall()
-            
+
             timeline = [{"hour": r["hour"], "count": r["count"]} for r in rows]
 
             # M6: per-camera observation counts
@@ -1623,8 +1758,13 @@ def start_pipeline(args):
     except Exception as e:
         print(f"Pipeline crashed: {e}")
 
-if __name__ == "__main__":
-    p = argparse.ArgumentParser(prog="intelligence_os.web")
+def main(argv=None):
+    """Console entry point (`intelligence-os`) and `python -m intelligence_os.web`.
+
+    A function rather than a bare `__main__` block so packaging can point at it;
+    nothing here is CWD-relative, so it runs from any directory.
+    """
+    p = argparse.ArgumentParser(prog="intelligence-os")
     # not required: falls back to config.yaml, then webcam 0 (§10 no-config boot)
     g = p.add_mutually_exclusive_group(required=False)
     g.add_argument("--webcam", type=int)
@@ -1637,18 +1777,34 @@ if __name__ == "__main__":
     p.add_argument("--show", dest="show", action="store_true", default=None)
     p.add_argument("--no-show", dest="show", action="store_false")
     p.add_argument("--port", type=int, default=8000)
+    # Stays 127.0.0.1 by default: there is no TLS, no CSRF token and no rate
+    # limiting on login, so the loopback interface is doing real work as a
+    # boundary. Containers are the honest exception — the network namespace is
+    # the boundary there, and a container that binds loopback is unreachable
+    # even from its own published port — so the image passes --host 0.0.0.0 and
+    # publishes to 127.0.0.1 on the host instead. See docs/docker.md.
+    p.add_argument("--host", type=str, default="127.0.0.1",
+                   help="interface to bind (default 127.0.0.1; use 0.0.0.0 in a container)")
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
     from intelligence_os.run import resolve_source
     resolve_source(args)                       # CLI > config.yaml > webcam 0
     if args.sensitivity is None:
         args.sensitivity = "balanced"          # web default: responsive live demo
     if args.show is None:
         args.show = False
-        
+
     t = threading.Thread(target=start_pipeline, args=(args,), daemon=True)
     t.start()
-    
-    server = ThreadedHTTPServer(('127.0.0.1', args.port), RequestHandler)
-    print(f"Starting Intelligence OS Web Server at http://localhost:{args.port} ...")
+
+    server = ThreadedHTTPServer((args.host, args.port), RequestHandler)
+    shown = "localhost" if args.host in ("127.0.0.1", "0.0.0.0") else args.host
+    print(f"Starting Intelligence OS Web Server at http://{shown}:{args.port} ...")
+    if args.host != "127.0.0.1":
+        print(f"  Bound to {args.host} — anything that can reach this interface can reach "
+              f"the dashboard. Put TLS and access control in front of it.")
     server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

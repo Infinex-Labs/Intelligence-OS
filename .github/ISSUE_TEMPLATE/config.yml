@@ -1,0 +1,11 @@
+# Blank issues stay off: the templates ask for the version, the source type and
+# which optional stages are enabled, and without those a bug report usually
+# costs two round trips before anyone can start on it.
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions and ideas
+    url: https://github.com/Infinex-Labs/Intelligence-OS/discussions
+    about: Open-ended discussion, tuning advice, show-and-tell of what you built.
+  - name: 🔒 Security vulnerability
+    url: https://github.com/Infinex-Labs/Intelligence-OS/security/advisories/new
+    about: Report privately. Please do not open a public issue for a security problem.

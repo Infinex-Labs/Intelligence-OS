@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Zones for the sample multi-camera setup. Polygons are [x, y] pixel pairs in",
+    "the camera's own frame, so a zone only makes sense for the camera it was",
+    "drawn on — 'doorway' at 640x480 means nothing on a 1920x1080 stream.",
+    "Drawing them in the UI (Zones pane) is easier than writing them by hand;",
+    "this file exists so you can see the format and check one into a repo.",
+    "A box is assigned to the first zone that contains it, so order matters:",
+    "put the specific zones before the catch-all ones."
+  ],
+  "zones": [
+    {
+      "name": "doorway",
+      "polygon": [[180, 120], [420, 120], [420, 400], [180, 400]]
+    },
+    {
+      "name": "loading_bay",
+      "polygon": [[0, 240], [640, 240], [640, 480], [0, 480]]
+    },
+    {
+      "name": "back_gate",
+      "polygon": [[60, 80], [560, 80], [560, 300], [60, 300]]
+    }
+  ]
+}

@@ -132,7 +132,7 @@ def test_scene_description_context_analysis():
         ]
     }, model="mock")
     states = desc.states()
-    check("context_analysis is flattened to state list", 
+    check("context_analysis is flattened to state list",
           ("ent_raj_1", "context_analysis:sleeping instead of working at desk") in states)
     check("state is also flattened to state list",
           ("ent_raj_1", "state:sleeping") in states)

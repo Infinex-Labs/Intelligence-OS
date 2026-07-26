@@ -24,7 +24,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -155,11 +155,41 @@ CREATE TABLE IF NOT EXISTS reports (
     body         TEXT NOT NULL
 );
 
+-- V4-M10: the assistant's chat history. A thread is a title plus ordered turns,
+-- and each turn stores the evidence payload it was rendered from — so reopening
+-- a thread shows what memory said then, not a silent re-run of the question.
+-- The counters are denormalized out of that payload on write: the KPI strip is
+-- then a SQL aggregate instead of a JSON scan over every answer ever given.
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    user_id         TEXT,
+    title           TEXT NOT NULL,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_turns (
+    turn_id         TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    asked_at        REAL NOT NULL,
+    question        TEXT NOT NULL,
+    answer          TEXT,
+    payload         TEXT,            -- the /api/ask result, exactly as rendered
+    latency_ms      INTEGER,
+    n_entities      INTEGER NOT NULL DEFAULT 0,
+    n_observations  INTEGER NOT NULL DEFAULT 0,
+    n_keyframes     INTEGER NOT NULL DEFAULT 0,
+    n_rule_events   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_obs_subject ON observations(subject_entity_id);
 CREATE INDEX IF NOT EXISTS idx_obs_time    ON observations(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sig_entity  ON signatures(entity_id);
 CREATE INDEX IF NOT EXISTS idx_snap_loc    ON scene_snapshots(location_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_rel_subject ON relations(subject_entity_id);
+CREATE INDEX IF NOT EXISTS idx_convo_user  ON conversations(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_turn_convo  ON chat_turns(conversation_id, asked_at);
 """
 
 
@@ -176,8 +206,10 @@ class Store:
             self.db_path = str(db_path)
         # run.py builds ONE Store on the main thread and hands it to every camera
         # thread and to the shared resolvers, so the connection has to outlive its
-        # creating thread. sqlite3.threadsafety == 3 (serialized) on every build we
-        # ship on, which is what makes sharing the handle safe; WAL below is about
+        # creating thread. SQLite is compiled SQLITE_THREADSAFE=1 (serialized) on
+        # every build we ship on, which is what makes sharing the handle safe --
+        # test_store_threads asserts it via PRAGMA compile_options, because the
+        # sqlite3.threadsafety attribute only reports the real mode on 3.11+; WAL below is about
         # concurrent *connections* (the web server opens its own per request) and
         # never covered this.
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -346,6 +378,132 @@ class Store:
     def get_report(self, report_id: str) -> Optional[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM reports WHERE report_id=?", (report_id,)).fetchone()
+
+    # --- assistant chat history (V4-M10) -------------------------------------
+    NEW_CHAT_TITLE = "New chat"
+
+    @staticmethod
+    def title_from_question(question: str, limit: int = 58) -> str:
+        """A thread names itself after its opening question, cut at a word
+        boundary so the sidebar never shows half a word."""
+        q = " ".join(str(question or "").split())
+        if not q:
+            return Store.NEW_CHAT_TITLE
+        if len(q) <= limit:
+            return q
+        cut = q[:limit].rsplit(" ", 1)[0] or q[:limit]
+        return cut.rstrip(" ,;:.") + "…"
+
+    def create_conversation(self, title: Optional[str] = None,
+                            user_id: Optional[str] = None) -> str:
+        cid = _uid("chat")
+        ts = now()
+        with self.tx() as c:
+            c.execute("INSERT INTO conversations(conversation_id,user_id,title,"
+                      "created_at,updated_at) VALUES (?,?,?,?,?)",
+                      (cid, user_id, (title or self.NEW_CHAT_TITLE).strip()
+                       or self.NEW_CHAT_TITLE, ts, ts))
+        return cid
+
+    def conversations(self, user_id: Optional[str] = None,
+                      limit: int = 200) -> list[sqlite3.Row]:
+        """Newest activity first, with the counts the sidebar shows. Passing a
+        user_id scopes the list to that operator; None means every thread."""
+        return self.conn.execute(
+            "SELECT c.*, COUNT(t.turn_id) AS n_turns, MAX(t.asked_at) AS last_asked "
+            "FROM conversations c LEFT JOIN chat_turns t USING(conversation_id) "
+            "WHERE (? IS NULL OR c.user_id = ?) "
+            "GROUP BY c.conversation_id ORDER BY c.updated_at DESC LIMIT ?",
+            (user_id, user_id, limit)).fetchall()
+
+    def get_conversation(self, conversation_id: str,
+                         user_id: Optional[str] = None) -> Optional[sqlite3.Row]:
+        """Passing a user_id makes this the ownership check too: another
+        operator's thread reads as absent rather than forbidden, so a thread id
+        can't be probed for existence. None means unscoped (CLI/tests), and a
+        thread with no owner (CLI-created) is visible to anyone signed in."""
+        return self.conn.execute(
+            "SELECT * FROM conversations WHERE conversation_id=? "
+            "AND (? IS NULL OR user_id IS NULL OR user_id = ?)",
+            (conversation_id, user_id, user_id)).fetchone()
+
+    def conversation_turns(self, conversation_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM chat_turns WHERE conversation_id=? ORDER BY asked_at, rowid",
+            (conversation_id,)).fetchall()
+
+    def add_chat_turn(self, conversation_id: str, question: str,
+                      answer: Optional[str] = None, payload: Optional[str] = None,
+                      latency_ms: Optional[int] = None, *, counts: Optional[dict] = None
+                      ) -> Optional[str]:
+        """Append a Q/A to a thread, bump its activity, and adopt the first
+        question as the title. Returns None if the thread is gone (deleted in
+        another tab while the answer was in flight)."""
+        if not self.get_conversation(conversation_id):
+            return None
+        tid = _uid("turn")
+        k = counts or {}
+        ts = now()
+        with self.tx() as c:
+            c.execute("INSERT INTO chat_turns(turn_id,conversation_id,asked_at,question,"
+                      "answer,payload,latency_ms,n_entities,n_observations,n_keyframes,"
+                      "n_rule_events) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      (tid, conversation_id, ts, question, answer, payload, latency_ms,
+                       int(k.get("entities", 0)), int(k.get("observations", 0)),
+                       int(k.get("keyframes", 0)), int(k.get("rule_events", 0))))
+            c.execute("UPDATE conversations SET updated_at=?, title=CASE WHEN title=? "
+                      "THEN ? ELSE title END WHERE conversation_id=?",
+                      (ts, self.NEW_CHAT_TITLE, self.title_from_question(question),
+                       conversation_id))
+        return tid
+
+    # ownership lives in the WHERE clause of every mutation below, not in the
+    # handler: a caller that forgets to pass user_id can't quietly widen access,
+    # and a thread id is never enough on its own to rename or delete a thread.
+    _OWNED = " AND (? IS NULL OR user_id IS NULL OR user_id = ?)"
+
+    def rename_conversation(self, conversation_id: str, title: str,
+                            user_id: Optional[str] = None) -> bool:
+        title = " ".join(str(title or "").split())[:120]
+        if not title:
+            return False
+        with self.tx() as c:
+            cur = c.execute("UPDATE conversations SET title=? WHERE conversation_id=?"
+                            + self._OWNED, (title, conversation_id, user_id, user_id))
+        return cur.rowcount > 0
+
+    def delete_conversation(self, conversation_id: str,
+                            user_id: Optional[str] = None) -> bool:
+        """Turns go with it — the ON DELETE CASCADE is live (foreign_keys=ON)."""
+        with self.tx() as c:
+            cur = c.execute("DELETE FROM conversations WHERE conversation_id=?"
+                            + self._OWNED, (conversation_id, user_id, user_id))
+        return cur.rowcount > 0
+
+    def add_chat_turn_owned(self, conversation_id: str, user_id: Optional[str],
+                            *args, **kw) -> Optional[str]:
+        """add_chat_turn, but refusing to write into someone else's thread."""
+        if not self.get_conversation(conversation_id, user_id):
+            return None
+        return self.add_chat_turn(conversation_id, *args, **kw)
+
+    def chat_stats(self, user_id: Optional[str] = None) -> dict:
+        """The assistant KPIs, every one a SUM over turns actually stored — the
+        UI displays these, it never accumulates its own tally."""
+        r = self.conn.execute(
+            "SELECT COUNT(DISTINCT c.conversation_id) AS threads, "
+            "       COUNT(t.turn_id)                  AS questions, "
+            "       IFNULL(SUM(t.n_entities),0)       AS entities, "
+            "       IFNULL(SUM(t.n_observations),0)   AS observations, "
+            "       IFNULL(SUM(t.n_keyframes),0)      AS keyframes, "
+            "       IFNULL(SUM(t.n_rule_events),0)    AS rule_events, "
+            "       AVG(t.latency_ms)                 AS avg_latency_ms, "
+            "       MAX(t.asked_at)                   AS last_asked "
+            "FROM conversations c LEFT JOIN chat_turns t USING(conversation_id) "
+            "WHERE (? IS NULL OR c.user_id = ?)", (user_id, user_id)).fetchone()
+        out = dict(r)
+        out["avg_latency_ms"] = round(out["avg_latency_ms"]) if out["avg_latency_ms"] else None
+        return out
 
     @contextmanager
     def tx(self):

@@ -417,8 +417,121 @@ input[type=text]:focus,input[type=password]:focus,textarea:focus,select:focus{ou
 .sidecard .kfg{display:flex;gap:6px;flex-wrap:wrap;padding:12px 14px}
 .sidecard .kfg img{width:76px;height:44px;object-fit:cover;border-radius:5px;border:1px solid var(--rule)}
 
-/* assistant full */
-.convo{max-width:760px}
+/* ---------- assistant (full pane) ----------
+   The one pane that scrolls internally instead of scrolling the page: the
+   thread list, the log and the composer each own their overflow, so the
+   composer stays reachable no matter how long the conversation gets. That
+   only works if the shell stops growing, hence the height pin below. */
+body:has(#assistant.on) .app{height:100vh}
+body:has(#assistant.on) .main{min-height:0;overflow:hidden}
+#assistant{padding:0}
+#assistant.on{display:grid;grid-template-columns:254px minmax(0,1fr);flex:1;min-height:0}
+
+/* thread history */
+.chist{display:flex;flex-direction:column;min-height:0;background:var(--paper);border-right:1px solid var(--rule)}
+.chist-top{display:flex;flex-direction:column;gap:9px;padding:14px 12px 11px;border-bottom:1px solid var(--rule)}
+.newchat{all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:9px;background:var(--ink);color:var(--card);font-size:13px;font-weight:500}
+.newchat:hover{opacity:.9}
+.newchat .pl{font-size:14px;line-height:1}
+.chist-find{display:flex;align-items:center;gap:7px;background:var(--card-2);border:1px solid var(--rule);border-radius:8px;padding:6px 9px;color:var(--ink-3)}
+.chist-find input{all:unset;flex:1;min-width:0;font-size:12.5px;color:var(--ink)}
+.chist-find input::placeholder{color:var(--ink-3)}
+.chist-list{flex:1;min-height:0;overflow-y:auto;padding:6px 8px 14px}
+.chist-g{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-3);font-weight:600;padding:11px 6px 4px}
+.crow{display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:8px;cursor:pointer;color:var(--ink-2)}
+.crow:hover{background:var(--rule)}
+.crow[aria-current=true]{background:var(--card-2);color:var(--ink);box-shadow:0 0 0 1px var(--rule)}
+.crow:focus-visible{outline:2px solid var(--unusual);outline-offset:1px}
+.crow .t{flex:1;min-width:0}
+.crow .t p{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .t span{font-family:'IBM Plex Mono';font-size:9.5px;color:var(--ink-3)}
+.crow .x{all:unset;cursor:pointer;flex-shrink:0;opacity:0;color:var(--ink-3);font-size:12px;padding:2px 5px;border-radius:5px}
+.crow:hover .x,.crow .x.armed{opacity:1}
+.crow .x:hover,.crow .x.armed{color:var(--fired);background:var(--fired-bg)}
+.chist-empty{color:var(--ink-3);font-size:12px;padding:16px 8px;line-height:1.5}
+.chist-foot{border-top:1px solid var(--rule);padding:9px 13px;color:var(--ink-3)}
+
+/* chat column */
+.chatcol{display:flex;flex-direction:column;min-width:0;min-height:0}
+.chathead{display:flex;align-items:center;gap:14px;padding:15px 22px 13px;max-width:904px;margin:0 auto;width:100%}
+.chathead h1{font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chathead .ct{min-width:0}
+.chathead .ct p{color:var(--ink-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chathead .r{margin-left:auto;display:flex;gap:8px;flex-shrink:0}
+.chathead .btn[disabled]{opacity:.4;cursor:default;pointer-events:none}
+.btn.danger:hover{color:var(--fired);border-color:var(--fired-line)}
+.btn.armed{color:var(--fired);border-color:var(--fired);background:var(--fired-bg)}
+#chatHistToggle{display:none}
+
+/* KPI strip — every figure comes from /api/chats stats, none accumulated here */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px;padding:0 22px 14px;max-width:904px;margin:0 auto;width:100%}
+.kpi{border:1px solid var(--rule);border-radius:10px;background:var(--card-2);padding:9px 11px}
+.kpi b{display:block;font-family:'Space Grotesk';font-size:18px;font-weight:500;letter-spacing:-.02em;line-height:1.25}
+.kpi span{font-size:9.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);font-weight:600}
+.kpi.hot b{color:var(--fired)}
+
+/* log */
+.chatlog{flex:1;min-height:0;overflow-y:auto;padding:2px 22px 10px}
+.turn{display:flex;gap:11px;margin:0 auto 20px;max-width:860px}
+.turn.you{justify-content:flex-end}
+.turn.you .bub{max-width:78%;background:var(--unusual);color:#fff;border-radius:12px 12px 3px 12px;padding:9px 13px;font-size:13px;line-height:1.5;white-space:pre-wrap}
+.turn.you .bub .tm{display:block;text-align:right;font-family:'IBM Plex Mono';font-size:9px;color:#D6E4F5;margin-top:3px}
+.turn .who2{width:26px;height:26px;border-radius:7px;flex-shrink:0;background:url(/static/logo-light.png) center/contain no-repeat}
+[data-theme=dark] .turn .who2{background-image:url(/static/logo.png)}
+.turn .body{flex:1;min-width:0}
+.turn .lead{font-size:13.5px;line-height:1.6;white-space:pre-wrap}
+.turn .sub{margin-top:4px;color:var(--ink-3)}
+.turn .anslist{border:1px solid var(--rule);border-radius:10px;background:var(--card-2);margin-top:12px;overflow:hidden}
+.turn .fail{color:var(--stale)}
+.ansmeta{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+.ansmeta i{font-style:normal;display:inline-flex;align-items:center;gap:5px;font-family:'IBM Plex Mono';font-size:10px;color:var(--ink-2);border:1px solid var(--rule);background:var(--card-2);border-radius:20px;padding:2px 9px}
+.ansmeta i b{font-weight:500;color:var(--ink)}
+.ansmeta i.hot{color:var(--fired);border-color:var(--fired-line);background:var(--fired-bg)}
+.ansmeta i.hot b{color:var(--fired)}
+.ansacts{display:flex;gap:13px;margin-top:10px}
+.ansacts button{all:unset;cursor:pointer;font-size:11.5px;color:var(--ink-3)}
+.ansacts button:hover{color:var(--unusual)}
+.thinking{display:inline-flex;align-items:center;gap:7px;color:var(--ink-3);font-size:12.5px}
+.thinking .d{display:inline-flex;gap:3px}
+.thinking .d i{width:5px;height:5px;border-radius:50%;background:var(--ink-3)}
+@media(prefers-reduced-motion:no-preference){
+  .thinking .d i{animation:bl 1.1s ease-in-out infinite}
+  .thinking .d i:nth-child(2){animation-delay:.15s}
+  .thinking .d i:nth-child(3){animation-delay:.3s}
+}
+@keyframes bl{0%,80%,100%{opacity:.25}40%{opacity:1}}
+
+/* empty state */
+.chatempty{max-width:860px;margin:0 auto;padding:22px 0 6px}
+.chatempty .mark{width:34px;height:34px;border-radius:9px;background:url(/static/logo-light.png) center/contain no-repeat;margin-bottom:13px}
+[data-theme=dark] .chatempty .mark{background-image:url(/static/logo.png)}
+.chatempty h2{font-size:19px}
+.chatempty>p{font-size:13px;color:var(--ink-3);margin-top:5px;max-width:62ch}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(208px,1fr));gap:9px;margin-top:19px}
+.scard{all:unset;cursor:pointer;border:1px solid var(--rule);border-radius:10px;background:var(--card-2);padding:11px 13px;display:block}
+.scard:hover{border-color:var(--rule-2)}
+.scard:focus-visible{outline:2px solid var(--unusual);outline-offset:1px}
+.scard p{font-size:12.5px;font-weight:500}
+.scard span{font-size:11.5px;color:var(--ink-3)}
+
+/* composer */
+.composerwrap{padding:9px 22px 15px;border-top:1px solid var(--rule);background:var(--card)}
+.composer2{display:flex;align-items:flex-end;gap:9px;max-width:860px;margin:0 auto;border:1px solid var(--rule-2);border-radius:13px;background:var(--card-2);padding:9px 10px 9px 14px;box-shadow:var(--shadow)}
+.composer2:focus-within{border-color:var(--ink-3)}
+.composer2 textarea{all:unset;flex:1;min-width:0;font:400 13.5px/1.5 Inter,system-ui,sans-serif;color:var(--ink);max-height:150px;overflow-y:auto;resize:none}
+.composer2 textarea::placeholder{color:var(--ink-3)}
+.composer2 button{all:unset;cursor:pointer;flex-shrink:0;width:32px;height:32px;border-radius:9px;background:var(--ink);color:var(--card);display:flex;align-items:center;justify-content:center;font-size:15px}
+.composer2 button:hover{opacity:.9}
+.composer2 button[disabled]{opacity:.32;cursor:default}
+.chint{max-width:860px;margin:7px auto 0;padding:0 3px;color:var(--ink-3);font-size:10.5px}
+/* margin:auto is what centres a modal <dialog>, and the global reset zeroes it */
+.renamedlg{margin:auto;width:min(400px,92vw);padding:16px;border:1px solid var(--rule-2);border-radius:12px;background:var(--card);color:var(--ink)}
+.renamedlg::backdrop{background:rgba(0,0,0,.55)}
+.renamedlg h3{font-size:14px}
+.renamedlg input{width:100%;margin:11px 0 14px;padding:9px 11px;border:1px solid var(--rule-2);border-radius:8px;background:var(--card);color:var(--ink);font-size:13px}
+.renamedlg input:focus{outline:none;border-color:var(--ink-3)}
+.renamedlg .r{display:flex;gap:8px;justify-content:flex-end}
+
 .suggest{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
 .suggest button{all:unset;cursor:pointer;font-size:12.5px;color:var(--unusual);border:1px solid var(--unusual-line);background:var(--unusual-bg);padding:7px 12px;border-radius:8px}
 .suggest button:hover{border-color:var(--unusual)}
@@ -465,6 +578,14 @@ input[type=text]:focus,input[type=password]:focus,textarea:focus,select:focus{ou
   .wall{grid-template-columns:1fr 1fr}
   .panehead{flex-wrap:wrap}.panehead .r{margin-left:0}
   .tablewrap{overflow-x:auto}
+  /* the thread list becomes a drawer over the chat — a 254px column would leave
+     no room to read the answer it belongs to */
+  #assistant.on{grid-template-columns:minmax(0,1fr);position:relative}
+  .chist{display:none}
+  #assistant.on.histopen .chist{display:flex;position:absolute;inset:0 auto 0 0;width:min(280px,86vw);z-index:5;box-shadow:0 0 40px rgba(0,0,0,.25)}
+  #chatHistToggle{display:block}
+  .chathead,.kpis,.chatlog,.composerwrap{padding-left:14px;padding-right:14px}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(96px,1fr))}
 }
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 .sr:focus{width:auto;height:auto;clip:auto;z-index:9;top:8px;left:8px;background:var(--ink);color:var(--card);padding:8px 13px;border-radius:8px;font-size:13px}
@@ -735,16 +856,40 @@ input[type=text]:focus,input[type=password]:focus,textarea:focus,select:focus{ou
     </section>
 
     <!-- ---------- AI ASSISTANT (full) ---------- -->
-    <section class="pane canvas" id="assistant">
-      <div class="panehead"><div><h1>AI Assistant</h1><p>Ask about anything the cameras saw. Every claim comes with the keyframe behind it.</p></div></div>
-      <div class="convo">
-        <div class="suggest" id="askSuggest">
-          <button>Who was seen in the last hour?</button>
-          <button>What happened today?</button>
-          <button>Which rules fired this week?</button>
+    <section class="pane" id="assistant">
+
+      <!-- thread history: persisted server-side, so it survives a reload -->
+      <aside class="chist" id="chist">
+        <div class="chist-top">
+          <button class="newchat" id="chatNew"><span class="pl">＋</span><span>New chat</span></button>
+          <label class="chist-find" for="chatFind"><span class="mono">⌕</span><input id="chatFind" placeholder="Search chats…"></label>
         </div>
-        <div class="chat" style="padding:0" id="askLog"></div>
-        <div class="card" style="margin-top:16px"><div class="composer"><input id="askInput" placeholder="Ask anything about your data…"><button id="askSend" aria-label="Send">→</button></div></div>
+        <div class="chist-list" id="chatList" role="list"></div>
+        <div class="chist-foot mono" id="chatFoot">—</div>
+      </aside>
+
+      <div class="chatcol">
+        <div class="chathead">
+          <button class="btn btn-s" id="chatHistToggle" aria-label="Show chat history">☰</button>
+          <div class="ct">
+            <h1 id="chatTitle">New chat</h1>
+            <p class="mono" id="chatSub">Grounded in what the cameras saw — every claim carries the keyframe behind it.</p>
+          </div>
+          <div class="r">
+            <button class="btn btn-s" id="chatRename">Rename</button>
+            <button class="btn btn-s" id="chatExport">Export</button>
+            <button class="btn btn-s danger" id="chatDelete">Delete</button>
+          </div>
+        </div>
+        <div class="kpis" id="chatKpis"></div>
+        <div class="chatlog" id="askLog"></div>
+        <div class="composerwrap">
+          <div class="composer2">
+            <textarea id="askInput" rows="1" placeholder="Ask anything about your data…" aria-label="Ask a question"></textarea>
+            <button id="askSend" aria-label="Send">↑</button>
+          </div>
+          <p class="chint mono">Enter to send · Shift+Enter for a new line · answers only state what the rows show</p>
+        </div>
       </div>
     </section>
 
@@ -830,6 +975,16 @@ input[type=text]:focus,input[type=password]:focus,textarea:focus,select:focus{ou
 
   </main>
 </div>
+
+<!-- rename a thread. A native <dialog>, not prompt(): prompt() blocks the whole
+     page and can't be styled or dismissed with Esc the way the rest of the app is -->
+<dialog id="chatRenameDlg" class="renamedlg">
+  <form method="dialog">
+    <h3>Rename chat</h3>
+    <input id="chatRenameInput" maxlength="120" aria-label="Chat title">
+    <div class="r"><button class="btn btn-s" value="">Cancel</button><button class="btn btn-s" id="chatRenameSave" value="save">Save</button></div>
+  </form>
+</dialog>
 
 <!-- keyframe viewer — native <dialog>: Esc, backdrop and focus trap are free -->
 <dialog id="kfDlg" class="kfdlg">
@@ -1371,11 +1526,23 @@ $('entGraph').onclick=()=>{const id=entOpen?.id; if(id)go('graph',{entity:id});}
 /* ================================================================
    Assistant — /api/ask returns aggregated evidence + the query it ran.
    Every claim is rendered from that payload; nothing is written here,
-   so the answer and its trace can never drift apart.
+   so the answer and its trace can never drift apart. Threads and their
+   turns live in the store (/api/chats), so reopening one replays the
+   answer that was given, not a fresh query against a moved-on memory.
    ================================================================ */
-function askBubble(r){
-  if(r.error)return `<div class="msg bot" style="max-width:100%"><p class="lead">Could not run that query.</p>
-    <p class="mono" style="color:var(--stale)">${esc(r.error)}</p></div>`;
+const SUGGESTIONS=[
+  ['Who was seen in the last hour?','a roll call of the live window'],
+  ['What happened today?','the day walked through in order'],
+  ['Which rules fired this week?','alerts with the keyframe that tripped them'],
+  ['Was anyone here after midnight?','out-of-hours presence, with durations'],
+];
+
+function askBubble(r,q){
+  const qa=q?` data-q="${esc(q)}"`:'';
+  if(r.error)return `<div class="turn ans"${qa}><span class="who2"></span><div class="body">
+    <p class="lead">Could not run that query.</p>
+    <p class="mono sub fail">${esc(r.error)}</p>
+    <div class="ansacts"><button data-act="retry">↻ Try again</button></div></div></div>`;
   const list=r.entities||[];
   const count=list.length
     ?`${list.length} ${list.length===1?'entity':'entities'} · ${r.total_observations} observations matched.`
@@ -1383,7 +1550,7 @@ function askBubble(r){
   // grounded prose leads when the model wrote one; the count becomes the sub-line.
   // r.answer is derived only from the evidence below, so the two can't disagree.
   const lead=r.answer
-    ?`<p class="lead">${esc(r.answer)}</p><p class="mono" style="color:var(--ink-3);margin-top:4px">${count}</p>`
+    ?`<p class="lead">${esc(r.answer)}</p><p class="mono sub">${count}</p>`
     :`<p class="lead">${count}</p>`;
   const rows=list.map(e=>`<div class="entity" data-ent="${esc(e.entity_id)}">
     <div class="t"><p>${esc(e.label)}</p><span>${e.n_observations} obs · ${fullTime(e.first_seen)} → ${fullTime(e.last_seen)}${
@@ -1395,46 +1562,280 @@ function askBubble(r){
     return `<span class="evchip" data-kf="${esc(name)}"><img src="${esc(k)}" alt=""><span class="mono">${esc(name.slice(0,12))}</span></span>`;
   }).join('')}</div>`:'';
   const fired=list.flatMap(e=>e.rule_events||[]);
+  /* per-answer KPIs — the same counts the strip aggregates, so an answer can
+     always be audited on its own without trusting the totals above */
+  const pl=(n,one,many)=>`<b>${n}</b> ${n===1?one:many}`;
+  const meta=[`<i>${pl(list.length,'entity','entities')}</i>`,
+              `<i>${pl(r.total_observations||0,'observation','observations')}</i>`,
+              `<i>${pl(kfs.length,'keyframe','keyframes')}</i>`,
+              `<i${fired.length?' class="hot"':''}>${pl(fired.length,'rule event','rule events')}</i>`];
+  if(r.latency_ms!=null)meta.push(`<i>${(r.latency_ms/1000).toFixed(1)}s</i>`);
   const trace=`<details class="trace"><summary>Show retrieved subgraph and query trace</summary><pre>${
     esc(JSON.stringify(r.query,null,2))}
 
 → ${list.length} entities · ${r.total_observations} observations · ${kfs.length} keyframes
 → ${fired.length} rule events in range
 → every figure above is a row count, not generated text</pre></details>`;
-  return `<div class="msg bot" style="max-width:100%">${lead}${rows}${chips}${trace}</div>`;
+  return `<div class="turn ans"${qa}><span class="who2"></span><div class="body">${lead}${
+    rows?`<div class="anslist">${rows}</div>`:''}${chips}
+    <div class="ansmeta">${meta.join('')}</div>${trace}
+    <div class="ansacts"><button data-act="copy">⧉ Copy answer</button><button data-act="retry">↻ Ask again</button></div>
+  </div></div>`;
 }
 
-// the conversation so far — sent with each turn so follow-ups ('what about
-// yesterday?', 'and her?') resolve against what was already asked and answered.
-const askTurns=[];
+const youBubble=(q,ts)=>`<div class="turn you"><div class="bub">${esc(q)}<span class="tm">${hhmm(ts)}</span></div></div>`;
+
+/* ---------- thread state (the server owns the history; this mirrors it) ---------- */
+let chatId=null, chatRows=[], chatStats=null, chatBusy=false;
+
+function emptyState(){
+  return `<div class="chatempty"><div class="mark" aria-hidden="true"></div>
+    <h2>What do you want to know?</h2>
+    <p>Ask in plain English. The question is turned into a memory query, and every
+       figure in the answer is a row count from what the cameras actually recorded.</p>
+    <div class="sgrid">${SUGGESTIONS.map(([q,s])=>
+      `<button class="scard" data-ask="${esc(q)}"><p>${esc(q)}</p><span>${esc(s)}</span></button>`).join('')}</div>
+  </div>`;
+}
+
+function setHeader(title,sub){
+  $('chatTitle').textContent=title;
+  $('chatSub').textContent=sub;
+  /* nothing to rename, export or delete until a thread exists */
+  ['chatRename','chatExport','chatDelete'].forEach(id=>$(id).disabled=!chatId);
+  disarm($('chatDelete'),'Delete');
+}
+
+const KPI=[['threads','Threads'],['questions','Questions'],['entities','Entities surfaced'],
+           ['observations','Observations'],['keyframes','Keyframes cited'],['rule_events','Rule events']];
+function renderKpis(s){
+  chatStats=s||chatStats;
+  const st=chatStats||{};
+  const tiles=KPI.map(([k,label])=>
+    `<div class="kpi${k==='rule_events'&&st[k]?' hot':''}"><b>${(st[k]??0).toLocaleString()}</b><span>${label}</span></div>`);
+  tiles.push(`<div class="kpi"><b>${st.avg_latency_ms?(st.avg_latency_ms/1000).toFixed(1)+'s':'—'}</b><span>Avg answer</span></div>`);
+  $('chatKpis').innerHTML=tiles.join('');
+  $('chatFoot').textContent=st.questions
+    ?`${st.threads} thread${st.threads===1?'':'s'} · last asked ${ago(st.last_asked)}`
+    :'no questions asked yet';
+}
+
+const dayStart=ts=>{const d=new Date(ts*1000);d.setHours(0,0,0,0);return d.getTime();};
+function groupOf(ts){
+  const day=86400000, t=dayStart(Date.now()/1000), d=dayStart(ts);
+  if(d===t)return 'Today';
+  if(d===t-day)return 'Yesterday';
+  if(d>t-7*day)return 'Previous 7 days';
+  if(d>t-30*day)return 'Previous 30 days';
+  return new Date(ts*1000).toLocaleDateString([],{month:'long',year:'numeric'});
+}
+
+function renderChatList(){
+  const f=$('chatFind').value.trim().toLowerCase();
+  const rows=f?chatRows.filter(c=>c.title.toLowerCase().includes(f)):chatRows;
+  if(!rows.length){
+    $('chatList').innerHTML=`<p class="chist-empty">${f?'No chat matches that.'
+      :'No chats yet. Ask something and this thread list fills in.'}</p>`;
+    return;
+  }
+  let out='', group=null;
+  for(const c of rows){
+    const g=groupOf(c.updated_at);
+    if(g!==group){ out+=`<div class="chist-g">${esc(g)}</div>`; group=g; }
+    out+=`<div class="crow" role="listitem" tabindex="0" data-cid="${esc(c.conversation_id)}"${
+      c.conversation_id===chatId?' aria-current="true"':''}>
+      <div class="t"><p>${esc(c.title)}</p><span>${c.n_turns} Q · ${ago(c.updated_at)}</span></div>
+      <button class="x" data-del="${esc(c.conversation_id)}" title="Delete chat" aria-label="Delete chat">✕</button></div>`;
+  }
+  $('chatList').innerHTML=out;
+}
+
+async function loadChats(){
+  try{
+    const r=await j('/api/chats');
+    chatRows=r.conversations||[]; renderKpis(r.stats); renderChatList();
+  }catch(e){ /* the pane still works; only the sidebar is stale */ }
+}
+
+function newChat(){
+  chatId=null;
+  $('askLog').innerHTML=emptyState();
+  setHeader('New chat','Grounded in what the cameras saw — every claim carries the keyframe behind it.');
+  renderChatList();
+  closeHist();
+  $('askInput').focus();
+}
+
+async function openChat(id){
+  let r; try{ r=await j('/api/chats/'+encodeURIComponent(id)); }
+  catch(e){ toast('Could not open that chat'); return; }
+  if(r.error){ toast(r.error); await loadChats(); return; }
+  chatId=id;
+  const c=r.conversation, turns=r.turns||[];
+  $('askLog').innerHTML=turns.map(t=>youBubble(t.question,t.asked_at)+
+    askBubble(t.payload||{answer:t.answer,entities:[],total_observations:0,
+                          query:null,latency_ms:t.latency_ms},t.question)).join('')
+    || emptyState();
+  setHeader(c.title,`${turns.length} question${turns.length===1?'':'s'} · started ${fullTime(c.created_at)}`);
+  renderChatList();
+  closeHist();
+  $('askLog').scrollTop=$('askLog').scrollHeight;
+}
+
+function setSending(on){
+  chatBusy=on;
+  $('askSend').disabled=on||!$('askInput').value.trim();
+}
+
 async function runAsk(q){
-  if(!q)return;
+  if(!q||chatBusy)return;
   const log=$('askLog');
-  log.insertAdjacentHTML('beforeend',
-    `<div class="msg me">${esc(q)}<span class="tm">${hhmm(Date.now()/1000)}</span></div>`);
+  log.querySelector('.chatempty')?.remove();
+  log.insertAdjacentHTML('beforeend',youBubble(q,Date.now()/1000));
   const wait=document.createElement('div');
-  wait.className='msg bot'; wait.textContent='Searching memory…';
-  log.appendChild(wait); wait.scrollIntoView({block:'nearest'});
+  wait.className='turn ans';
+  wait.innerHTML=`<span class="who2"></span><div class="body"><span class="thinking">Searching memory
+    <span class="d"><i></i><i></i><i></i></span></span></div>`;
+  log.appendChild(wait); log.scrollTop=log.scrollHeight;
+  setSending(true);
   let r; try{
     r=await j('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-                          body:JSON.stringify({question:q,history:askTurns.slice(-6)})});
+                          body:JSON.stringify({question:q,conversation_id:chatId})});
   }catch(e){ r={error:'the assistant is unreachable'}; }
-  wait.outerHTML=askBubble(r);
-  // remember the turn (the prose if we got one, else the count) for the next follow-up
-  if(!r.error){
-    const a=r.answer||(r.entities?`${r.entities.length} entities · ${r.total_observations} observations matched.`:'');
-    askTurns.push({q,a});
-  }
-  log.lastElementChild.scrollIntoView({block:'nearest'});
+  wait.outerHTML=askBubble(r,q);
+  if(r.conversation_id)chatId=r.conversation_id;
+  if(r.conversation_title)setHeader(r.conversation_title,$('chatSub').textContent);
+  setSending(false);
+  log.scrollTop=log.scrollHeight;
+  await loadChats();          // title, order and KPIs, all read back from the store
 }
 
-const askGo=()=>{const i=$('askInput');const q=i.value.trim();i.value='';runAsk(q);};
+/* ---------- composer ---------- */
+const grow=el=>{el.style.height='auto';el.style.height=Math.min(el.scrollHeight,150)+'px';};
+const askGo=()=>{
+  const i=$('askInput'); const q=i.value.trim();
+  if(!q||chatBusy)return;
+  i.value=''; grow(i); runAsk(q);
+};
 $('askSend').onclick=askGo;
-$('askInput').onkeydown=e=>{if(e.key==='Enter')askGo();};
-$('askSuggest').querySelectorAll('button').forEach(b=>b.onclick=()=>{
-  go('assistant'); runAsk(b.textContent.trim());
+$('askSend').disabled=true;
+$('askInput').oninput=e=>{grow(e.target);$('askSend').disabled=chatBusy||!e.target.value.trim();};
+$('askInput').onkeydown=e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();askGo();}   // Shift+Enter = newline
+};
+
+/* ---------- thread actions ---------- */
+$('chatNew').onclick=newChat;
+$('chatFind').oninput=renderChatList;
+$('chatHistToggle').onclick=()=>$('assistant').classList.toggle('histopen');
+const closeHist=()=>$('assistant').classList.remove('histopen');
+
+$('chatList').onclick=async e=>{
+  const del=e.target.closest('[data-del]');
+  if(del){
+    e.stopPropagation();
+    if(!arm(del,'✕'))return;                    // first click arms, second deletes
+    const id=del.dataset.del;
+    await j('/api/chats/'+encodeURIComponent(id)+'/delete',{method:'POST'});
+    if(id===chatId)newChat();
+    await loadChats();
+    toast('Chat deleted');
+    return;
+  }
+  const row=e.target.closest('[data-cid]');
+  if(row&&row.dataset.cid!==chatId)openChat(row.dataset.cid);
+};
+$('chatList').onkeydown=e=>{
+  const row=e.target.closest('[data-cid]');
+  if(row&&(e.key==='Enter'||e.key===' ')){e.preventDefault();openChat(row.dataset.cid);}
+};
+
+/* two-step confirm instead of confirm(): a blocking dialog for a click you can
+   undo by asking again is a worse trade than one extra click */
+const armTimers=new WeakMap();
+function arm(btn,label){
+  if(btn.classList.contains('armed'))return true;
+  btn.classList.add('armed');
+  btn.dataset.label=btn.textContent;
+  btn.textContent=label==='✕'?'✕':'Confirm?';
+  clearTimeout(armTimers.get(btn));
+  armTimers.set(btn,setTimeout(()=>disarm(btn),3500));
+  return false;
+}
+function disarm(btn,label){
+  if(!btn)return;
+  clearTimeout(armTimers.get(btn));
+  btn.classList.remove('armed');
+  if(btn.dataset.label||label)btn.textContent=btn.dataset.label||label;
+  delete btn.dataset.label;
+}
+
+$('chatDelete').onclick=async()=>{
+  if(!chatId)return;
+  if(!arm($('chatDelete')))return;
+  const id=chatId;
+  await j('/api/chats/'+encodeURIComponent(id)+'/delete',{method:'POST'});
+  newChat(); await loadChats(); toast('Chat deleted');
+};
+
+$('chatRename').onclick=()=>{
+  if(!chatId)return;
+  $('chatRenameInput').value=$('chatTitle').textContent;
+  $('chatRenameDlg').showModal();
+  $('chatRenameInput').select();
+};
+$('chatRenameDlg').addEventListener('close',async()=>{
+  if($('chatRenameDlg').returnValue!=='save'||!chatId)return;
+  const title=$('chatRenameInput').value.trim();
+  if(!title)return;
+  const r=await j('/api/chats/'+encodeURIComponent(chatId)+'/rename',
+                  {method:'POST',headers:{'Content-Type':'application/json'},
+                   body:JSON.stringify({title})});
+  if(r.conversation)$('chatTitle').textContent=r.conversation.title;
+  await loadChats();
 });
-/* the dashboard composer is a doorway, not a second chat — one log, one history */
+
+/* export is a client-side render of what's already on screen — no new endpoint,
+   and nothing in the file that wasn't in the answers */
+$('chatExport').onclick=()=>{
+  if(!chatId)return;
+  const lines=[`# ${$('chatTitle').textContent}`,
+               `Intelligence OS · exported ${new Date().toLocaleString()}`,''];
+  $('askLog').querySelectorAll('.turn').forEach(t=>{
+    if(t.classList.contains('you'))
+      lines.push('## Q: '+t.querySelector('.bub').textContent.replace(/\s+$/,''),'');
+    else{
+      lines.push(t.querySelector('.lead')?.textContent||'');
+      const m=[...t.querySelectorAll('.ansmeta i')].map(i=>i.textContent.trim()).join(' · ');
+      if(m)lines.push('',`_${m}_`);
+      const tr=t.querySelector('.trace pre');
+      if(tr)lines.push('','```',tr.textContent.trim(),'```');
+      lines.push('');
+    }
+  });
+  const url=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/markdown'}));
+  const a=document.createElement('a');
+  a.href=url; a.download=$('chatTitle').textContent.replace(/[^\w\- ]+/g,'').slice(0,60)+'.md';
+  a.click(); URL.revokeObjectURL(url);
+};
+
+/* answer actions + the empty-state suggestion cards */
+$('askLog').onclick=e=>{
+  const card=e.target.closest('[data-ask]');
+  if(card){runAsk(card.dataset.ask);return;}
+  const act=e.target.closest('.ansacts button[data-act]');
+  if(!act)return;
+  const turn=act.closest('.turn');
+  if(act.dataset.act==='retry'){ if(turn.dataset.q)runAsk(turn.dataset.q); return; }
+  const text=turn.querySelector('.lead')?.textContent||'';
+  navigator.clipboard?.writeText(text).then(()=>toast('Answer copied'),()=>toast('Copy failed'));
+};
+
+newChat();
+onEnter.assistant=()=>{loadChats();$('askInput').focus();};
+
+/* the dashboard composer is a doorway, not a second chat — it hands the question
+   to the assistant pane, which owns the thread */
 const dashAskGo=()=>{
   const i=$('dashAskInput');const q=i.value.trim();i.value='';
   if(!q)return; go('assistant'); runAsk(q);

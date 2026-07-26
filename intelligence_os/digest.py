@@ -129,17 +129,17 @@ def build(store: Store, since: float, now: Optional[float] = None) -> dict:
     for o in rows:
         b_idx = min(num_buckets - 1, max(0, int((o["timestamp"] - since) / bucket_width)))
         obs_by_bucket[b_idx] += 1
-        
+
     fired_by_bucket = set()
     for item in rule_items:
         b_idx = min(num_buckets - 1, max(0, int((item["timestamp"] - since) / bucket_width)))
         fired_by_bucket.add(b_idx)
-        
+
     unusual_by_bucket = set()
     for item in unusual:
         b_idx = min(num_buckets - 1, max(0, int((item["timestamp"] - since) / bucket_width)))
         unusual_by_bucket.add(b_idx)
-        
+
     histogram = []
     for i in range(num_buckets):
         count = obs_by_bucket[i]
@@ -192,7 +192,7 @@ def get_merge_suggestions(store: Store, threshold: Optional[float] = None) -> li
     sigs = {e["entity_id"]: store.entity_signatures(e["entity_id"], "face")
             for e in people}
     ids = [e["entity_id"] for e in people if sigs[e["entity_id"]]]
-    
+
     suggestions = []
     seen = set()
     for i in range(len(ids)):
