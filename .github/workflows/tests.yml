@@ -46,13 +46,24 @@ jobs:
           pip install -e . --no-deps
           python -c "import intelligence_os; print(intelligence_os.__version__)"
 
-      # The two acceptance gates, run first and named, so a red build says what
-      # broke instead of scrolling past 108 dots.
+      # The acceptance gates, run first and named, so a red build says what
+      # broke instead of scrolling past 114 dots.
       - name: Acceptance gate — identity and correctness
         run: python -m intelligence_os.tests.test_foundation
 
       - name: Acceptance gate — scene state to distillation
         run: python -m intelligence_os.tests.test_pipeline
+
+      # Asserts search quality still matches docs/search-baseline.md — in BOTH
+      # directions. A case that regresses fails; so does a case that starts
+      # passing, until its baseline is flipped. Neither direction moves silently.
+      - name: Acceptance gate — search quality baseline
+        run: python -m intelligence_os.tests.test_search_quality
+
+      # The scorecard itself, printed on every run so the numbers are in the log
+      # even when nothing drifted. Unscaled: CI minutes are not for benchmarking.
+      - name: Search scorecard
+        run: python scripts/search_eval.py
 
       - name: Full suite
         run: python -m unittest discover -s intelligence_os/tests -t . -v

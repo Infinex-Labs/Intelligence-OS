@@ -1,0 +1,323 @@
+# Search quality cases (search plan Phase 0).
+#
+# Each case is a question, a STUBBED query plan, and what the memory must return.
+# The plan is stubbed on purpose: this measures RETRIEVAL, not how well the LLM
+# parses English. Planner accuracy is a separate, key-requiring suite.
+#
+# Fields
+#   id          stable identifier; the scorecard is keyed on it
+#   question    the English a user would actually type
+#   gap         which audited gap it exhibits (docs/search-architecture-plan.md §1.2)
+#   fixed_by    the phase expected to make it pass (0 = already passing)
+#   plan        the structured query handed to ask.execute()
+#   baseline    pass | fail — what today's code does. CI asserts reality matches
+#               this, so a phase that fixes a case turns the suite red until the
+#               baseline is flipped. Deliberate: nothing improves silently either.
+#
+# Expectations (all optional; a case passes only if every one present is met)
+#   expect_entities      corpus keys that MUST appear in the results
+#   expect_text          substring that must appear in some returned state
+#   expect_keyframe      substring of a keyframe path that must be attached
+#   expect_empty         true -> a genuine true-negative; must return nothing
+#   expect_min_count     minimum aggregate count (recurrence questions)
+#   expect_max_entities  upper bound (limit / negation cases)
+#   forbid_entities      corpus keys that must NOT appear
+
+# ---------------------------------------------------------------------------
+# Regression guards — these work today and must never stop working.
+# ---------------------------------------------------------------------------
+- id: bay_window_dave
+  question: "was anyone at the loading bay six days ago?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: -6.2d, end: -5.8d, zone: loading_bay}
+  expect_entities: [dave]
+  expect_keyframe: kf_dave
+
+- id: label_filter_priya
+  question: "when was Priya around?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: null, entity_label: priya}
+  expect_entities: [priya]
+
+- id: rule_event_surfaced
+  question: "did any rule fire at the bay?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: null, predicate_contains: "rule_fired"}
+  expect_entities: [dave]
+  expect_keyframe: kf_rule_loiter
+
+- id: substring_hit_waiting
+  question: "anyone waiting around?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: null, predicate_contains: "waiting"}
+  expect_entities: [nadia]
+  expect_text: "standing around"
+
+- id: substring_hit_butts
+  question: "any cigarette butts on the ground?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: null, predicate_contains: "butts"}
+  expect_text: "butts"
+
+- id: zone_scoping_excludes_others
+  question: "who was in aisle 3?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: aisle_3}
+  expect_entities: [priya]
+  forbid_entities: [nadia, courier]
+
+# ---------------------------------------------------------------------------
+# G1 — word matching. Stemming and phrase handling: Phase 2.
+# ---------------------------------------------------------------------------
+- id: stem_cigarettes
+  question: "anyone with cigarettes?"
+  gap: G1
+  fixed_by: 2
+  baseline: fail          # "cigarettes" != "cigarette"; no stemmer
+  plan: {start: null, end: null, zone: null, predicate_contains: "cigarettes"}
+  expect_entities: [dave]
+
+- id: stopword_on_the_phone
+  question: "was anyone on the phone?"
+  gap: G1
+  fixed_by: 2
+  baseline: fail          # stored "on phone"; the word "the" breaks the substring
+  plan: {start: null, end: null, zone: null, predicate_contains: "on the phone"}
+  expect_entities: [priya]
+
+- id: term_order_flickering_light
+  question: "was a light flickering anywhere?"
+  gap: G1
+  fixed_by: 2
+  baseline: fail          # stored "aisle light flickering"; word order differs
+  plan: {start: null, end: null, zone: null, predicate_contains: "flickering light"}
+  expect_text: "flickering"
+
+- id: stem_parcels
+  question: "anyone carrying parcels?"
+  gap: G1
+  fixed_by: 2
+  baseline: fail          # stored "a parcel"
+  plan: {start: null, end: null, zone: null, predicate_contains: "parcels"}
+  expect_entities: [courier]
+
+# ---------------------------------------------------------------------------
+# G1 — different vocabulary entirely. Needs meaning, not words: Phase 6.
+# ---------------------------------------------------------------------------
+- id: paraphrase_smoking
+  question: "was anyone smoking out back?"
+  gap: G1
+  fixed_by: 6
+  baseline: fail          # "smoking" shares no stem with "having a cigarette"
+  plan: {start: null, end: null, zone: null, text: "smoking"}
+  expect_entities: [dave]
+  expect_text: "cigarette"
+
+- id: paraphrase_loitering
+  question: "was anyone loitering by the side gate?"
+  gap: G1
+  fixed_by: 6
+  baseline: fail          # stored "standing around, waiting"
+  plan: {start: null, end: null, zone: side_gate, text: "loitering"}
+  expect_entities: [nadia]
+
+- id: paraphrase_phone_call
+  question: "was anyone taking a call?"
+  gap: G1
+  fixed_by: 6
+  baseline: fail
+  plan: {start: null, end: null, zone: null, text: "taking a call"}
+  expect_entities: [priya]
+
+- id: paraphrase_unattended_bike
+  question: "any bike left unattended?"
+  gap: G1
+  fixed_by: 6
+  baseline: fail          # stored "bicycle — unlocked, against the fence"
+  plan: {start: null, end: null, zone: null, text: "bike left unattended"}
+  expect_text: "bicycle"
+
+# ---------------------------------------------------------------------------
+# G2 — perceived, described, then discarded before the insert. Phase 1.
+# ---------------------------------------------------------------------------
+- id: object_gate_open
+  question: "was the gate left open?"
+  gap: G2
+  fixed_by: 1
+  baseline: fail          # report said "gate — open, unlatched"; never written
+  plan: {start: null, end: null, zone: null, text: "gate open"}
+  expect_text: "gate"
+
+- id: object_forklift_parked
+  question: "where was the forklift parked?"
+  gap: G2
+  fixed_by: 1
+  baseline: fail          # objects[] dropped by SceneDescription.states()
+  plan: {start: null, end: null, zone: null, text: "forklift"}
+  expect_text: "forklift"
+
+- id: area_spill_in_aisle
+  question: "was there a spill in aisle 3?"
+  gap: G2
+  fixed_by: 1
+  baseline: fail          # locations[].contents dropped
+  plan: {start: null, end: null, zone: aisle_3, text: "spill"}
+  expect_text: "spill"
+
+- id: area_pallets_stacked
+  question: "were the pallets still stacked at the bay?"
+  gap: G2
+  fixed_by: 1
+  baseline: fail
+  plan: {start: null, end: null, zone: loading_bay, text: "pallet stack"}
+  expect_text: "pallet"
+
+# ---------------------------------------------------------------------------
+# G3 / G8 — habits and co-presence. Built, stored, unreachable. Phase 5.
+# ---------------------------------------------------------------------------
+- id: recurrence_van_how_often
+  question: "how often does that van come by?"
+  gap: G3
+  fixed_by: 5
+  baseline: fail          # ask.py never queries the relations table
+  plan: {intent: how_often, start: null, end: null, entity_label: "white van"}
+  expect_entities: [van]
+  expect_min_count: 6
+  # A raw observation count is not a recurrence answer — the result has to carry
+  # the mined habit, or "how often" is just "how many rows".
+  expect_result_key: recurrence
+
+- id: recurrence_van_weekday
+  question: "does the van come mostly on Tuesdays?"
+  gap: G8
+  fixed_by: 5
+  baseline: fail          # habits bucket hour-of-day only, no weekday dimension
+  plan: {intent: how_often, start: null, end: null, entity_label: "white van",
+         group_by: weekday}
+  expect_entities: [van]
+  expect_min_count: 6
+  expect_result_key: recurrence
+
+- id: copresence_who_with_priya
+  question: "who was with Priya at the gate?"
+  gap: G3
+  fixed_by: 5
+  baseline: fail          # scene_snapshots unreachable from ask
+  plan: {intent: who_with, start: null, end: null, entity_label: priya}
+  expect_entities: [visitor]
+  expect_result_key: co_presence
+
+- id: copresence_two_at_gate
+  question: "were two people at the side gate at the same time?"
+  gap: G3
+  fixed_by: 5
+  baseline: fail
+  plan: {intent: who_with, start: null, end: null, zone: side_gate}
+  expect_entities: [priya, visitor]
+  expect_result_key: co_presence
+
+- id: relation_priya_uses_forklift
+  question: "does Priya use the forklift?"
+  gap: G3
+  fixed_by: 5
+  baseline: fail          # 'uses' relation mined but never queried
+  plan: {intent: relations, start: null, end: null, entity_label: priya}
+  expect_entities: [forklift]
+  expect_result_key: relations
+
+# ---------------------------------------------------------------------------
+# G5 — the five-slot form cannot express these. Phase 4.
+# ---------------------------------------------------------------------------
+- id: multi_zone_bay_or_aisle
+  question: "anyone at the loading bay or in aisle 3?"
+  gap: G5
+  fixed_by: 4
+  baseline: fail          # `zone` is a single string
+  plan: {start: null, end: null, zones: [loading_bay, aisle_3]}
+  expect_entities: [dave, priya, van]
+  forbid_entities: [nadia, courier, visitor]  # side_gate only; a real 2-zone filter excludes them
+
+- id: exclude_the_courier
+  question: "anyone at the side gate except the delivery courier?"
+  gap: G5
+  fixed_by: 4
+  baseline: fail          # no way to express "except"
+  plan: {start: null, end: null, zone: side_gate,
+         exclude_entity_labels: ["delivery courier"]}
+  expect_entities: [nadia]
+  forbid_entities: [courier]
+
+- id: camera_filter_yard
+  question: "what did the yard camera see?"
+  gap: G5
+  fixed_by: 4
+  baseline: fail          # camera_id recorded since M6, never searchable
+  plan: {start: null, end: null, cameras: [cam_yard]}
+  expect_entities: [nadia, courier]
+  forbid_entities: [dave]
+
+- id: limit_last_two
+  question: "the last two sightings anywhere"
+  gap: G5
+  fixed_by: 4
+  baseline: fail          # no ordering or limit
+  plan: {start: null, end: null, order: desc, limit: 2}
+  expect_max_entities: 2
+
+- id: entity_type_objects_only
+  question: "which vehicles or objects were seen?"
+  gap: G5
+  fixed_by: 4
+  baseline: fail          # no entity_type filter
+  plan: {start: null, end: null, entity_type: object}
+  expect_entities: [van]
+  forbid_entities: [dave, priya]
+
+- id: count_sightings_at_bay
+  question: "how many sightings at the loading bay?"
+  gap: G5
+  fixed_by: 4
+  baseline: fail          # no count intent; aggregates done in Python
+  plan: {intent: count, start: null, end: null, zone: loading_bay}
+  expect_min_count: 8
+  expect_result_key: count
+
+# ---------------------------------------------------------------------------
+# True negatives — must stay empty. These guard Phase 7's relaxation ladder
+# from widening its way into inventing an answer.
+# ---------------------------------------------------------------------------
+- id: negative_empty_window
+  question: "was anyone there next week?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: 7d, end: 14d, zone: null}
+  expect_empty: true
+
+- id: negative_no_such_person
+  question: "was Mallory here?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: null, entity_label: mallory}
+  expect_empty: true
+
+- id: negative_nothing_perceived
+  question: "did anyone bring a dog in?"
+  gap: none
+  fixed_by: 0
+  baseline: pass
+  plan: {start: null, end: null, zone: null, predicate_contains: "dog"}
+  expect_empty: true
