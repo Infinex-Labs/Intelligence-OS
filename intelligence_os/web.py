@@ -12,7 +12,7 @@ from typing import Optional
 
 import cv2
 from intelligence_os.store import Store
-from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG, ROOT
+from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG, ROOT, retained_keyframe
 from intelligence_os.run import run as run_pipeline
 
 # Anchored to the package, not the working directory: an installed console
@@ -27,6 +27,11 @@ pipeline_state: dict = {"paused": False, "cameras": {}}
 
 # M7: the store knows these only as objects; the map legend calls them vehicles
 VEHICLES = {"car", "truck", "bus", "motorcycle", "bicycle", "train", "boat"}
+
+
+# A keyframe the browser can actually load — see config.retained_keyframe for why
+# the existence check happens at advertise time rather than in the browser.
+kf_name = retained_keyframe
 
 def update_frame(img, cam_name: str = "default"):
     """M6: per-camera frame update. run.py passes cam_name via the on_frame callback."""
@@ -386,20 +391,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "origin": o["origin"],
                     "confidence": o["confidence"],
                 })
-                # source_ref is an absolute keyframe path; expose only its basename
-                ref = o["source_ref"]
-                if ref:
-                    name = os.path.basename(ref)
-                    if name not in seen_kf:
-                        seen_kf.add(name)
-                        keyframes.append("/keyframe/" + name)
+                # source_ref is an absolute keyframe path; expose only its
+                # basename, and only if retention has not reclaimed the file
+                name = kf_name(o["source_ref"])
+                if name and name not in seen_kf:
+                    seen_kf.add(name)
+                    keyframes.append("/keyframe/" + name)
             self.send_json({
                 "predicate": row["predicate"],
                 "status": row["status"],
                 "weight": round(row["weight"], 2),
                 "evidence_count": len(obs_ids),
                 "observations": observations,
-                "keyframes": keyframes,   # some may 404 if pruned by retention
+                "keyframes": keyframes,   # pruned ones are omitted, not 404s
             })
         finally:
             store.close()
@@ -472,7 +476,8 @@ class RequestHandler(BaseHTTPRequestHandler):
     def serve_rules_compile(self):
         """Compile an English rule (§9.2). Returns the spec, or the refusal —
         verdicts map to the UI: compiled=pass, infeasible=block, needs_identity/
-        no_key=warn. Saved rules arm on the next pipeline start."""
+        no_key=warn. A saved rule arms within a couple of seconds — the engine
+        polls rules.yaml (RuleEngine._maybe_reload); no restart needed."""
         from intelligence_os.rules import compile_rule, save_rule, Refusal
         text = (self._read_json().get('text') or '').strip()
         if not text:
@@ -538,6 +543,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "uptime_s": round(now_ts - last_ts, 1) if last_ts else None,
                 "is_stream": cs.get("is_stream", False),
                 "paused": cs.get("paused", False),
+                # A crashed camera reports why, instead of looking merely idle.
+                "error": cs.get("error"),
+                "stopped_at": cs.get("stopped_at"),
             })
         self.send_json({"cameras": out, "unassigned_zones": zones.get(None, [])})
 
@@ -901,7 +909,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "face_matching": CONFIG.identity.enabled})
 
     def serve_rule_toggle(self, name):
-        """Enable/disable a rule (M5). Flips the flag; arms on next pipeline start."""
+        """Enable/disable a rule (M5). Flips the flag; the engine picks it up
+        within RuleEngine.reload_poll_s seconds."""
         from intelligence_os.rules import load_rules, set_rule_enabled
         cur = next((r for r in load_rules() if r.get("name") == name), None)
         if cur is None:
@@ -910,6 +919,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         new = not cur.get("enabled", True)
         set_rule_enabled(name, new)
         self.send_json({"name": name, "enabled": new})
+
+    @staticmethod
+    def _drop_pruned_keyframes(result: dict) -> None:
+        """Strip links to frames retention has already reclaimed.
+
+        Done here rather than in ask.execute(): whether a file is on disk is a
+        serving concern, and execute() runs this per observation row in the query
+        hot path. Counts are taken after this, so the UI never reports a keyframe
+        it cannot render.
+        """
+        for e in result.get('entities') or []:
+            e['keyframes'] = [u for u in (e.get('keyframes') or [])
+                              if retained_keyframe(u)]
+            for ev in e.get('rule_events') or []:
+                if ev.get('keyframe') and not retained_keyframe(ev['keyframe']):
+                    ev['keyframe'] = None
 
     @staticmethod
     def _ask_counts(result: dict) -> dict:
@@ -962,6 +987,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             result["conversation_id"] = cid
             result["latency_ms"] = round((time.time() - started) * 1000)
+            self._drop_pruned_keyframes(result)
             result["counts"] = self._ask_counts(result)
             # stored as rendered: reopening the thread replays this answer, it
             # does not re-run the query against a memory that has moved on
@@ -1154,7 +1180,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         label = (pred.removeprefix("rule_fired:").replace('_', ' ') if o["origin"] == 'rule'
                  else pred.replace('_', ' '))
         return {"kind": kind, "ref_id": ref, "label": label, "timestamp": o["timestamp"],
-                "keyframe": os.path.basename(o["source_ref"]) if o["source_ref"] else None}
+                "keyframe": kf_name(o["source_ref"])}
 
     def serve_cases(self):
         """?status= . Every case ships its resolved items — a case list with three
@@ -1330,7 +1356,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "entity_id": o["subject_entity_id"],
                     "entity": (ent["label"] if ent and ent["label"]
                                else o["subject_entity_id"]),
-                    "keyframe": os.path.basename(o["source_ref"]) if o["source_ref"] else None,
+                    "keyframe": kf_name(o["source_ref"]),
                 })
         finally:
             store.close()
@@ -1426,7 +1452,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "camera": o["camera_id"],
                     "timestamp": o["timestamp"],
                     "confidence": o["confidence"],
-                    "keyframe": os.path.basename(o["source_ref"]) if o["source_ref"] else None,
+                    "keyframe": kf_name(o["source_ref"]),
                 })
         finally:
             store.close()
@@ -1495,7 +1521,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "origin": o["origin"],
                 # the picture behind the claim — an investigator reads the frame,
                 # not the predicate
-                "keyframe": os.path.basename(o["source_ref"]) if o["source_ref"] else None,
+                "keyframe": kf_name(o["source_ref"]),
             } for o in obs[-15:][::-1]]          # newest first
 
             self.send_json({
@@ -1529,8 +1555,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 a = seen.get(e["entity_id"])
                 ent_dict["times_seen"] = a["n"] if a else 0
                 ent_dict["last_seen"] = a["last_seen"] if a else None
-                ent_dict["keyframe"] = (os.path.basename(a["keyframe"])
-                                        if a and a["keyframe"] else None)
+                ent_dict["keyframe"] = kf_name(a["keyframe"]) if a else None
                 # ponytail: frequency = sightings per day over the entity's known
                 # lifespan. Cheap and honest; swap for a rolling 7d rate once there
                 # is enough history that "since first seen" stops being the window.

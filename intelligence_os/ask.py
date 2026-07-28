@@ -179,6 +179,9 @@ def execute(store: Store, query: dict) -> dict:
 
 
 def _kf(source_ref: Optional[str]) -> Optional[str]:
+    """Keyframe URL for a source_ref. A pure transform on purpose: whether the
+    file is still on disk is a serving concern (web.py drops pruned ones), and
+    this runs once per observation row inside the query hot path."""
     return f"/keyframe/{os.path.basename(source_ref)}" if source_ref else None
 
 

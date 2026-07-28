@@ -202,7 +202,12 @@ def _camera_loop(cam_name: str, source, shared: _SharedModels,
             resolved: list[ResolvedDetection] = []
             new_entity = False
             for d in dets:
-                if d.cls_name == "person" and CONFIG.identity.enabled:
+                # `available` is checked, not just the config flag: face matching
+                # can be switched on in the dashboard without the optional
+                # insightface extra installed. Without this the branch below
+                # `continue`s on every person and the camera records nobody.
+                if (d.cls_name == "person" and CONFIG.identity.enabled
+                        and shared.face_embedder.available):
                     x1, y1, x2, y2 = d.bbox
                     crop = frame.image[max(0, y1):y2, max(0, x1):x2]
                     faces = shared.face_embedder.detect(crop) if crop.size else []
@@ -367,8 +372,28 @@ def run(args, on_frame=None, state=None) -> None:
         state["cameras"][cam_name] = cam_state
         # M6: on_frame is per-camera (web.py passes cam_name to pick the right buffer)
         cam_on_frame = (lambda img, _n=cam_name: on_frame(img, cam_name=_n)) if on_frame else None
+
+        def guarded(*a, **kw):
+            """A camera thread that dies must SAY so.
+
+            Without this, an exception is printed to stderr and the thread is
+            gone: the dashboard keeps serving the last frame it buffered, so a
+            dead camera is indistinguishable from a still one. The reason lands
+            on cam_state, which /api/cameras reports.
+            """
+            try:
+                _camera_loop(*a, **kw)
+            except Exception as e:                      # noqa: BLE001
+                import traceback
+                cam_state["error"] = f"{type(e).__name__}: {e}"
+                cam_state["stopped_at"] = time.time()
+                print(f"[run:{cam_name}] CAMERA STOPPED — {cam_state['error']}")
+                traceback.print_exc()
+            else:
+                cam_state["stopped_at"] = time.time()
+
         t = threading.Thread(
-            target=_camera_loop,
+            target=guarded,
             args=(cam_name, source, shared, cam_state, args),
             kwargs={"on_frame": cam_on_frame, "show": show and solo},
             daemon=True,

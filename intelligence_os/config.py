@@ -32,6 +32,22 @@ DB_PATH = Path(os.environ.get("INTELLIGENCE_OS_DB", DATA_DIR / "memory.db"))
 FRAMES_DIR = DATA_DIR / "frames"   # retained keyframes/crops for audit (NFR retention)
 
 
+def retained_keyframe(source_ref) -> "str | None":
+    """Basename of a still-on-disk keyframe, or None if retention reclaimed it.
+
+    Retention (§11) deletes raw frames after `raw_retention_days` but keeps the
+    observations — the claim outlives the picture, on purpose. So an old row's
+    `source_ref` names a file that is gone, and anything that hands that name to
+    a client produces a broken image. Callers check here before advertising it.
+
+    None means retention worked, not that something failed.
+    """
+    if not source_ref:
+        return None
+    name = os.path.basename(str(source_ref))
+    return name if (FRAMES_DIR / name).exists() else None
+
+
 def resolve_yolo_weights() -> str:
     """§10 model weights: fetch on first run, never bake in. Precedence:
     INTELLIGENCE_OS_YOLO env > a local checkout copy (dev keeps it, gitignored) >

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from intelligence_os.tests import _stubs   # noqa: F401  (stubs the deps we lack)
 
-from intelligence_os import web                      # noqa: E402
+from intelligence_os import config, web              # noqa: E402
 from intelligence_os.store import Store              # noqa: E402
 
 NOW = time.time()
@@ -19,6 +19,13 @@ class TestTimeline(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         db = Path(self.tmp.name) / "t.db"
+        # The payload advertises a keyframe only if the frame is still on disk
+        # (config.retained_keyframe — retention deletes frames but keeps the
+        # claims), so the fixture has to actually put one there.
+        frames = Path(self.tmp.name) / "frames"
+        frames.mkdir()
+        (frames / "a.jpg").write_bytes(b"jpg")
+        self._real_frames, config.FRAMES_DIR = config.FRAMES_DIR, frames
         s = Store(db_path=db)
         # An entity created long ago: everything it does is routine.
         old = s.create_entity("person", label="Regular")
@@ -44,6 +51,7 @@ class TestTimeline(unittest.TestCase):
 
     def tearDown(self):
         web.Store = self._real
+        config.FRAMES_DIR = self._real_frames
         self.tmp.cleanup()
 
     def _get(self, query=""):
