@@ -19,7 +19,7 @@ import time
 from typing import Optional
 
 from .config import CONFIG
-from .store import Store
+from .store import SCENE_PREFIX, Store
 
 QUERY_TOOL = {
     "name": "graph_query",
@@ -110,11 +110,12 @@ def execute(store: Store, query: dict) -> dict:
     label_q = (query.get("entity_label") or "").strip().lower()
     pred_q = (query.get("predicate_contains") or "").strip().lower()
 
+    loc_names = {r["location_id"]: r["name"] for r in store.locations()}
     loc_id = None
     if zone_name:
-        for r in store.locations():
-            if r["name"] == zone_name:
-                loc_id = r["location_id"]
+        for lid, name in loc_names.items():
+            if name == zone_name:
+                loc_id = lid
                 break
 
     rows = store.observations(since=start)
@@ -131,13 +132,22 @@ def execute(store: Store, query: dict) -> dict:
         ent = per_entity.get(eid)
         if ent is None:
             row = store.get_entity(eid)
-            if row is None:
+            if row is not None:
+                etype = row["type"]
+                label = row["label"] or f"{row['type'].capitalize()} {eid[-6:]}"
+            elif eid.startswith(SCENE_PREFIX):
+                # Facts nobody owns — an open gate, a spill — are recorded
+                # against the place rather than pinned on a bystander
+                # (store.scene_subject). They are still answers, so they surface
+                # as a pseudo-entity named for where they were seen.
+                place = eid[len(SCENE_PREFIX):]
+                etype, label = "scene", loc_names.get(place, place)
+            else:
                 continue
-            label = row["label"] or f"{row['type'].capitalize()} {eid[-6:]}"
             if label_q and label_q not in label.lower():
                 continue
             ent = per_entity[eid] = {
-                "entity_id": eid, "label": label, "type": row["type"],
+                "entity_id": eid, "label": label, "type": etype,
                 "first_seen": o["timestamp"], "last_seen": o["timestamp"],
                 "n_observations": 0, "states": [], "rule_events": [], "keyframes": [],
             }

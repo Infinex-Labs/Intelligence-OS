@@ -35,7 +35,7 @@ jobs:
       # requirements-dev.txt, NOT requirements.txt: the suite is offline and
       # stubs the heavy optional deps (intelligence_os/tests/_stubs.py), so CI
       # does not download torch to check the memory graph. Three packages,
-      # ~30 seconds. Verified locally: 110/110 pass with exactly these.
+      # ~30 seconds. Verified locally: 115/115 pass with exactly these.
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -47,7 +47,7 @@ jobs:
           python -c "import intelligence_os; print(intelligence_os.__version__)"
 
       # The acceptance gates, run first and named, so a red build says what
-      # broke instead of scrolling past 114 dots.
+      # broke instead of scrolling past 115 dots.
       - name: Acceptance gate — identity and correctness
         run: python -m intelligence_os.tests.test_foundation
 

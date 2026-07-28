@@ -18,6 +18,7 @@ Score: python scripts/search_eval.py
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -301,13 +302,45 @@ class SearchQualityBaseline(unittest.TestCase):
                          [r["actual"] for r in b["cases"]])
         self.assertEqual(a["retention"]["rate"], b["retention"]["rate"])
 
-    def test_perception_retention_is_measured(self):
-        """Phase 1's target. Today this is well under 1.0 because objects[] and
-        locations[] are dropped by SceneDescription.states() — the number is the
-        point, so only assert it is a real measurement."""
+    def test_nothing_perceived_is_discarded(self):
+        """Phase 1's target, and now a ratchet.
+
+        Before Phase 1 this measured 46.2%: `objects[]` was lost entirely and
+        `locations[].contents` almost so. `SceneDescription.rows()` keeps all
+        four sections, so the only acceptable number here is 1.0 — a section
+        that stops being written shows up as a failure naming itself.
+        """
         r = self.report["retention"]
         self.assertGreater(r["perceived"], 0, "nothing perceived — fixture is empty")
-        self.assertLessEqual(r["retained"], r["perceived"])
+        lost = {name: f"{s['retained']}/{s['perceived']}"
+                for name, s in r["sections"].items() if s["retained"] < s["perceived"]}
+        self.assertEqual({}, lost, f"perceived but not searchable: {lost}")
+
+    def test_full_report_round_trips(self):
+        """The audit copy is the whole report, not the flattened rows.
+
+        Re-flattening is how a later phase can improve wording over history
+        instead of only going forward, so `raw` has to survive verbatim.
+        """
+        store = build_corpus()["_store"]
+        try:
+            descs = store.scene_descriptions()
+            self.assertEqual(len(search_corpus.PERCEIVED), len(descs))
+            for (_off, _cam, _zone, _kf, report), row in zip(
+                    search_corpus.PERCEIVED, descs):
+                raw = json.loads(row["raw"])
+                self.assertEqual(sorted(report), sorted(raw),
+                                 "a report section went missing on the way in")
+                self.assertEqual([o["label"] for o in report["objects"]],
+                                 [o["label"] for o in raw["objects"]])
+                self.assertTrue(row["text"], "flattened text is empty")
+            # Every VLM row points back at the report it was flattened out of.
+            vlm = [o for o in store.observations() if o["origin"] == "vlm"]
+            self.assertTrue(vlm)
+            orphans = [o["observation_id"] for o in vlm if not o["description_id"]]
+            self.assertEqual([], orphans, "VLM rows with no provenance")
+        finally:
+            store.close()
 
 
 def main() -> int:

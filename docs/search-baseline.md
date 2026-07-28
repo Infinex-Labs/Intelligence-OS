@@ -7,12 +7,19 @@ never overwrite, so the trajectory stays in version control.
 | phase | cases passing | silent failures | recall@1 | recall@5 | MRR | retention | p50 ms | p95 ms |
 |---|---|---|---|---|---|---|---|---|
 | **0 — baseline** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | 46.2% | 440.14 | 1150.03 |
+| **1 — keep what was perceived** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | **100.0%** | 470 | 1249 |
 
 Latency measured at corpus scale **100000** observations. Reproduce with:
 
 ```
 python scripts/search_eval.py --scale 100000 --write-baseline
 ```
+
+Latency is wall clock and **not** reproducible to the digit: repeated runs of the
+Phase 1 row spanned p50 449–515 ms and p95 1198–1344 ms, so the recorded figures
+are the median of four. Read a change of tens of milliseconds as noise; the
+p50-over-400ms, p95-over-a-second finding is what matters, and Phase 3 is what
+addresses it. Case counts and retention *are* exact and asserted by CI.
 
 ## What the baseline row means
 
@@ -21,7 +28,9 @@ python scripts/search_eval.py --scale 100000 --write-baseline
   to a user this is indistinguishable from "it never happened".
 - **retention** — of the facts the vision model actually reported, the share
   that survived the write path into a searchable row. Anything under 100% is
-  perception the system paid for and then discarded (gap G2).
+  perception the system paid for and then discarded (gap G2). Closed in Phase 1
+  and now a ratchet: `test_nothing_perceived_is_discarded` fails, naming the
+  section, if any report section stops being written.
 - **recall / MRR** — entity-level, over the cases that name expected entities.
   Today's ordering is by `first_seen`, not relevance, so MRR measures the
   absence of ranking rather than the quality of it. At this corpus size result
@@ -31,7 +40,20 @@ python scripts/search_eval.py --scale 100000 --write-baseline
   Padding rows sit in their own zone and on their own entity, so scaling the
   corpus changes how much the engine sifts without changing any answer.
 
+## Why Phase 1 moved retention but not the case count
+
+Phase 1 is a *write*-path change: object and area facts are now stored, indexed
+to the report they came from, and attributed to the place rather than to whoever
+was standing nearby. But the four cases that ask for them
+(`object_gate_open`, `object_forklift_parked`, `area_spill_in_aisle`,
+`area_pallets_stacked`) query with a `text` field the engine does not yet honour,
+and the harness scores an unsupported plan field as a hard fail rather than let
+an unfiltered result pass for the wrong reason. They flip in **Phase 2**, which
+is where `text` becomes queryable. The data they need is in place as of now.
+
 ## Baseline detail
+
+Still-failing rows below are stated as of the latest phase row above.
 
 | case | gap | fixed by phase | today |
 |---|---|---|---|

@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from .config import CONFIG
+from .store import scene_subject
 
 
 # --- Trigger decision (§8) ---------------------------------------------------
@@ -130,21 +131,135 @@ SYSTEM_DESCRIBE = (
 )
 
 
+# A report is a handful of facts; this cap exists only so a pathological VLM
+# response cannot flood the observations table from one call. Generous on purpose
+# — truncating perception is the bug this phase is fixing, not a feature.
+MAX_DESCRIPTION_ROWS = 64
+
+# Which sections of a report reference a specific person, and which describe the
+# place. The distinction decides who a row is written against, so the write path
+# reads it off `SceneRow.section` rather than guessing from the wording.
+UNOWNED_SECTIONS = ("objects", "locations")
+
+
+@dataclass(frozen=True)
+class SceneRow:
+    """One fact from a report, ready to become an observation.
+
+    `predicate` and `text` are deliberately different things. The predicate is
+    the machine contract — prefixed, stable, what rules and distillation match
+    on. The text is the human wording, and it is the surface the lexical and
+    semantic indexes are built over. Rewording `text` for searchability can
+    never break a rule; that is the whole reason there are two fields.
+    """
+    ref: str          # entity id, or the 'person'/'scene' pseudo-ref
+    predicate: str
+    text: str
+    section: str      # people | notable | objects | locations
+    place: str = ""   # zone NAME the report attributed it to, if any
+
+
 @dataclass
 class SceneDescription:
     raw: dict
     model: str
-    def states(self) -> list[tuple[str, str]]:
-        """Flatten to (subject_ref, predicate) observations for memory write."""
-        out = []
-        for p in self.raw.get("people", []):
+
+    def rows(self) -> list[SceneRow]:
+        """Every section of the report, flattened. Nothing is dropped.
+
+        `DESCRIBE_SCHEMA` requires four sections and we were paying for all four;
+        only three were ever written. So "was the gate left open?" was
+        unanswerable because the answer had been seen, described, and then
+        deleted before the insert (search plan Phase 1, gap G2).
+
+        Ordered people -> notable -> objects -> locations, which makes
+        `states()` a prefix filter over this rather than a separate code path.
+        """
+        out: list[SceneRow] = []
+        for p in self.raw.get("people") or []:
+            ref = p.get("ref") or "person"
             if p.get("state"):
-                out.append((p.get("ref", "person"), f"state:{p['state']}"))
+                out.append(SceneRow(ref, f"state:{p['state']}", p["state"], "people"))
             if p.get("context_analysis"):
-                out.append((p.get("ref", "person"), f"context_analysis:{p['context_analysis']}"))
-        for n in self.raw.get("notable", []):
-            out.append(("scene", n))
-        return out
+                out.append(SceneRow(ref, f"context_analysis:{p['context_analysis']}",
+                                    p["context_analysis"], "people"))
+        for n in self.raw.get("notable") or []:
+            if n:
+                out.append(SceneRow("scene", n, n, "notable"))
+        for o in self.raw.get("objects") or []:
+            label = (o.get("label") or "").strip()
+            if not label:
+                continue
+            detail = (o.get("description") or "").strip()
+            text = f"{label} — {detail}" if detail else label
+            out.append(SceneRow("scene", f"object:{text}", text, "objects"))
+        for loc in self.raw.get("locations") or []:
+            place = (loc.get("location") or "").strip()
+            for item in loc.get("contents") or []:
+                item = (item or "").strip()
+                if not item:
+                    continue
+                out.append(SceneRow(
+                    "scene",
+                    f"area:{place} — {item}" if place else f"area:{item}",
+                    f"{item} in {place}" if place else item,
+                    "locations", place))
+        return out[:MAX_DESCRIPTION_ROWS]
+
+    def flatten(self) -> str:
+        """The whole report as one string, for the description-level index."""
+        return " | ".join(r.text for r in self.rows())
+
+    def states(self) -> list[tuple[str, str]]:
+        """The three sections the write path kept before Phase 1.
+
+        Retained because callers and tests are written against this shape. New
+        code should use `rows()`, which keeps the other two sections as well.
+        """
+        return [(r.ref, r.predicate) for r in self.rows()
+                if r.section not in UNOWNED_SECTIONS]
+
+
+def record_description(store, desc: SceneDescription, *, timestamp: float,
+                       camera_id: Optional[str] = None,
+                       source_ref: Optional[str] = None,
+                       owner_entity_id: Optional[str] = None,
+                       location_id: Optional[str] = None,
+                       zone_ids: Optional[dict] = None,
+                       confidence: float = 0.6) -> str:
+    """Persist one report: the whole thing first, then a row per fact.
+
+    Search plan Phase 1. Two rules live here and nowhere else:
+
+      * an unowned fact (an object, a thing in a place) is written against the
+        PLACE, so "the gate is open" is never recorded as a claim about whoever
+        happened to be in frame;
+      * a bare 'person'/'scene' ref attaches to the entity that owns the report,
+        and a ref that resolves to nobody is dropped rather than guessed at.
+
+    `zone_ids` maps zone NAME -> location_id, for attributing area facts to the
+    zone the model named. `location_id` is the fallback and the zone for owned
+    rows. Returns the description_id.
+    """
+    zone_ids = zone_ids or {}
+    desc_id = store.add_scene_description(
+        model=desc.model, raw=desc.raw, text=desc.flatten(), timestamp=timestamp,
+        camera_id=camera_id, location_id=location_id, source_ref=source_ref)
+    for row in desc.rows():
+        if row.section in UNOWNED_SECTIONS:
+            loc = zone_ids.get(row.place) or location_id
+            subj = scene_subject(loc, camera_id)
+        else:
+            subj = owner_entity_id if row.ref in ("person", "scene") else row.ref
+            loc = location_id
+            if not subj or not subj.startswith("ent_"):
+                continue
+        store.add_observation(subj, row.predicate, location_id=loc,
+                              timestamp=timestamp, confidence=confidence,
+                              source_ref=source_ref, origin="vlm",
+                              camera_id=camera_id, description_id=desc_id,
+                              text=row.text)
+    return desc_id
 
 
 # --- Crop verifier (cascade stage 4, §9.1) -----------------------------------

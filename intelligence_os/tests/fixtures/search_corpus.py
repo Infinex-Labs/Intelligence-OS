@@ -8,10 +8,10 @@ Two things live here, and keeping them apart is the whole point:
 
   the database what actually survived the write path into SQLite.
 
-`build()` writes the corpus by calling the REAL `SceneDescription.states()` and
-the real `run.py` subject-resolution rule, not a copy of them. So the gap between
-those two columns is measured, not asserted — and when Phase 1 stops discarding
-objects and areas, `retention()` moves on its own without this file changing.
+`build()` writes VLM output through `vlm.record_description()` — the same function
+`run.py` calls, not a copy of it. So the gap between those two columns is
+measured, not asserted: whatever production drops, this drops, and `retention()`
+reports it.
 
 Timestamps are anchored to a fixed UTC Tuesday so weekday and hour buckets are
 identical on every machine. Note the open question in the plan (§8.2): habits are
@@ -23,7 +23,7 @@ from __future__ import annotations
 import calendar
 
 from intelligence_os.store import Store
-from intelligence_os.vlm import SceneDescription
+from intelligence_os.vlm import SceneDescription, record_description
 
 # 2026-06-02 14:00:00 UTC — a Tuesday. Verified, not assumed.
 ANCHOR = calendar.timegm((2026, 6, 2, 14, 0, 0, 0, 0, 0))
@@ -174,19 +174,11 @@ def build(store: Store, *, scale: int = 0) -> dict:
     # SceneDescription, so whatever the production write path drops, this drops.
     for off, cam, zone_key, kf, report in PERCEIVED:
         resolved = _resolve_refs(report, ids)
-        desc = SceneDescription(resolved, MODEL)
-        for subj_ref, predicate in desc.states():
-            # run.py's rule: bare 'person'/'scene' refs attach to the first
-            # resolved entity; anything that isn't an entity id is dropped.
-            subj = subj_ref
-            if subj_ref in ("person", "scene"):
-                subj = _first_entity(resolved, ids)
-            if not subj or not subj.startswith("ent_"):
-                continue
-            store.add_observation(subj, predicate, location_id=zones[zone_key],
-                                  timestamp=ANCHOR + off, confidence=0.6,
-                                  source_ref=f"/kf/{kf}", origin="vlm",
-                                  camera_id=cam)
+        record_description(
+            store, SceneDescription(resolved, MODEL), timestamp=ANCHOR + off,
+            camera_id=cam, source_ref=f"/kf/{kf}",
+            owner_entity_id=_first_entity(resolved, ids),
+            location_id=zones[zone_key])
 
     # --- co-presence snapshots (unreachable from ask today, G3) -------------
     store.add_snapshot(zones["side_gate"], [people["priya"], people["visitor"]],

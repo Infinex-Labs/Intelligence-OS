@@ -28,7 +28,7 @@ from .observe import Observer, ResolvedDetection
 from .rules import RuleEngine
 from .scene_state import SceneState
 from .store import Store
-from .vlm import Describer, TriggerContext, TriggerDecider
+from .vlm import Describer, TriggerContext, TriggerDecider, record_description
 
 
 def _scene_signature(resolved: list[ResolvedDetection]) -> str:
@@ -294,15 +294,13 @@ def _camera_loop(cam_name: str, source, shared: _SharedModels,
                 })
                 vlm_calls += 1
                 if desc:
-                    for subj_ref, predicate in desc.states():
-                        subj = (resolved[0].entity_id if subj_ref in ("person", "scene")
-                                and resolved else subj_ref)
-                        if not subj.startswith("ent_"):
-                            continue
-                        store.add_observation(subj, predicate, confidence=0.6,
-                                              source_ref=keyframe_path, origin="vlm",
-                                              timestamp=frame.timestamp,
-                                              camera_id=cam_name)
+                    # Search plan Phase 1: the whole report is persisted, not the
+                    # three-of-four sections the old write path kept.
+                    record_description(
+                        store, desc, timestamp=frame.timestamp, camera_id=cam_name,
+                        source_ref=keyframe_path,
+                        owner_entity_id=resolved[0].entity_id if resolved else None,
+                        zone_ids={z.name: z.location_id for z in scene.zones})
             last_signature = sig
 
             if _present(resolved, vlm_flash):

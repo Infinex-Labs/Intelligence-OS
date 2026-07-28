@@ -254,7 +254,7 @@ in the log even when nothing drifted. 114 tests pass (was 110); ruff clean.
 
 ---
 
-### Phase 1 — Stop discarding what was perceived
+### Phase 1 — Stop discarding what was perceived ✅ DONE
 
 **Why.** G2. The vision model already reports `objects[]` (with descriptions) and
 `locations[].contents`. `SceneDescription.states()` throws both away, and the
@@ -311,6 +311,41 @@ and ranking of Phases 2–6.
 
 **Done when.** A fixture frame's full report round-trips out of
 `scene_descriptions`, and objects/areas appear as searchable rows.
+
+**Result.**
+
+| | before | after |
+|---|---|---|
+| perception retention | 46.2% (12/26) | **100.0% (26/26)** |
+| `objects` | 0/6 — total loss | 6/6 |
+| `locations.contents` | 2/10 | 10/10 |
+| cases passing | 9/32 | 9/32 — see below |
+
+Landed as specced, with three decisions worth recording:
+
+- **The unowned subject is `scene:<location_id>`, not the first person in frame.**
+  `store.scene_subject()` mints it and `ask.execute()` renders it as a
+  pseudo-entity named for the zone. Attributing "the gate is open" to Dave
+  because Dave was nearby would have been a fabricated claim about a person,
+  which is the one thing this system is built not to do.
+- **`predicate` and `text` are separate fields on purpose.** The predicate stays
+  the machine contract that rules and distillation match on; `text` is the
+  search surface. Rewording a row for searchability can now never break a rule.
+- **One write path, not two.** `vlm.record_description()` holds the whole rule
+  and both `run.py` and the Phase 0 fixture call it, so the fixture measures
+  production rather than a copy of it that could drift.
+
+**Case count did not move, and that is correct.** The four object/area cases
+query with a `text` field the engine does not honour until Phase 2, and the
+harness scores an unsupported plan field as a hard fail rather than let an
+unfiltered result pass for the wrong reason. The data they need now exists;
+Phase 2 makes it reachable.
+
+**Also unchanged by design:** production VLM rows still carry no `location_id`
+for people-facts — one VLM call covers a frame spanning several zones, so
+attributing a person's state to one zone would be a guess. Area facts *do* get a
+zone, from the name the model itself used. `p95` latency rose within measurement
+noise (~1150 → ~1249 ms); Phase 3 is what addresses latency.
 
 ---
 

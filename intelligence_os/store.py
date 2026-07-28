@@ -39,6 +39,20 @@ def now() -> float:
     return time.time()
 
 
+# Search plan Phase 1. Some facts have no owner: an open gate, a spill, a stack
+# of pallets. The old write path had one option — pin them on the first person in
+# frame — which reads as a claim about that person. These get a subject of their
+# own instead, named for the place, so the fact stays queryable without inventing
+# an entity or libelling a bystander.
+SCENE_PREFIX = "scene:"
+
+
+def scene_subject(location_id: Optional[str] = None,
+                  camera_id: Optional[str] = None) -> str:
+    """Subject id for an unowned fact. Prefers the zone; falls back to the camera."""
+    return SCENE_PREFIX + (location_id or camera_id or "unknown")
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entities (
     entity_id   TEXT PRIMARY KEY,
@@ -183,8 +197,26 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id) ON DELETE CASCADE
 );
 
+-- Search plan Phase 1: the COMPLETE vision-model report, kept verbatim.
+-- Until this table existed, `SceneDescription.states()` picked three of the four
+-- sections it returns and the rest was dropped before the insert — an open gate
+-- was seen, described, and then deleted. `raw` is the report as JSON so nothing
+-- is lost even if the flattening rules change later; `text` is the flattened
+-- prose, which is the surface the lexical and semantic indexes are built on.
+CREATE TABLE IF NOT EXISTS scene_descriptions (
+    description_id TEXT PRIMARY KEY,
+    camera_id      TEXT,
+    location_id    TEXT,
+    timestamp      REAL NOT NULL,
+    source_ref     TEXT,            -- keyframe, for provenance
+    model          TEXT NOT NULL,   -- which VLM produced it
+    raw            TEXT NOT NULL,   -- the whole report, verbatim JSON
+    text           TEXT NOT NULL    -- flattened prose
+);
+
 CREATE INDEX IF NOT EXISTS idx_obs_subject ON observations(subject_entity_id);
 CREATE INDEX IF NOT EXISTS idx_obs_time    ON observations(timestamp);
+CREATE INDEX IF NOT EXISTS idx_desc_time   ON scene_descriptions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sig_entity  ON signatures(entity_id);
 CREATE INDEX IF NOT EXISTS idx_snap_loc    ON scene_snapshots(location_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_rel_subject ON relations(subject_entity_id);
@@ -223,6 +255,7 @@ class Store:
         self._migrate_m7()
         self._migrate_m9()
         self._migrate_v4()
+        self._migrate_v5_search()
         self.conn.commit()
 
     def close(self) -> None:
@@ -288,6 +321,28 @@ class Store:
         try:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_obs_status ON observations(status)")
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v5_search(self) -> None:
+        """Search plan Phase 1: link each row back to the full report it came
+        from, and give it a human-readable `text`.
+
+        `predicate` stays exactly what it was — the machine contract that rules
+        and distillation match on. `text` is the search surface, so rewording a
+        row for searchability can never break a rule.
+        """
+        for stmt in (
+            "ALTER TABLE observations ADD COLUMN description_id TEXT",
+            "ALTER TABLE observations ADD COLUMN text TEXT",
+        ):
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        try:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_obs_desc ON observations(description_id)")
         except sqlite3.OperationalError:
             pass
 
@@ -643,17 +698,20 @@ class Store:
                         confidence: float = 0.5, source_ref: Optional[str] = None,
                         origin: str = "detector", timestamp: Optional[float] = None,
                         camera_id: Optional[str] = None,
-                        user_id: Optional[str] = None
+                        user_id: Optional[str] = None,
+                        description_id: Optional[str] = None,
+                        text: Optional[str] = None
                         ) -> str:
         oid = _uid("obs")
         with self.tx() as c:
             c.execute(
                 "INSERT INTO observations(observation_id,subject_entity_id,predicate,"
-                "object_entity_id,location_id,timestamp,confidence,source_ref,origin,camera_id,user_id,status) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "object_entity_id,location_id,timestamp,confidence,source_ref,origin,camera_id,user_id,status,"
+                "description_id,text) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (oid, subject_entity_id, predicate, object_entity_id, location_id,
                  timestamp or now(), confidence, source_ref, origin, camera_id, user_id,
-                 "new" if origin == "rule" else None),
+                 "new" if origin == "rule" else None, description_id, text),
             )
         return oid
 
@@ -691,6 +749,49 @@ class Store:
             (subject_entity_id, predicate, object_entity_id),
         ).fetchone()
         return row["t"] if row and row["t"] is not None else None
+
+    # --- scene descriptions (search plan Phase 1) ----------------------------
+    def add_scene_description(self, *, model: str, raw: dict, text: str,
+                              timestamp: Optional[float] = None,
+                              camera_id: Optional[str] = None,
+                              location_id: Optional[str] = None,
+                              source_ref: Optional[str] = None) -> str:
+        """Store one VLM report whole, before any of it is flattened into rows.
+
+        This is the audit copy. If a later phase changes how reports are
+        flattened, it can be re-run over these rows; if the flattening ever
+        drops something again, `raw` is the evidence that it was there.
+        """
+        did = _uid("desc")
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO scene_descriptions(description_id,camera_id,location_id,"
+                "timestamp,source_ref,model,raw,text) VALUES (?,?,?,?,?,?,?,?)",
+                (did, camera_id, location_id, timestamp or now(), source_ref, model,
+                 json.dumps(raw, sort_keys=True), text),
+            )
+        return did
+
+    def get_scene_description(self, description_id: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM scene_descriptions WHERE description_id=?",
+            (description_id,)).fetchone()
+
+    def scene_descriptions(self, *, since: Optional[float] = None,
+                           until: Optional[float] = None,
+                           camera_id: Optional[str] = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM scene_descriptions"
+        conds, args = [], []
+        if since is not None:
+            conds.append("timestamp>=?"); args.append(since)
+        if until is not None:
+            conds.append("timestamp<=?"); args.append(until)
+        if camera_id is not None:
+            conds.append("camera_id=?"); args.append(camera_id)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        q += " ORDER BY timestamp"
+        return self.conn.execute(q, args).fetchall()
 
     # --- scene snapshots -----------------------------------------------------
     def add_snapshot(self, location_id: str, present_entity_ids: Sequence[str],
