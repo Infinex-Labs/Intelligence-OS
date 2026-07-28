@@ -12,7 +12,9 @@ from typing import Optional
 
 import cv2
 from intelligence_os.store import Store
-from intelligence_os.config import FRAMES_DIR, DATA_DIR, CONFIG, ROOT, retained_keyframe
+from intelligence_os.config import (COCO_CLASSES, FRAMES_DIR, DATA_DIR, CONFIG, ROOT,
+                                    kind_for_class, normalize_object_classes,
+                                    retained_keyframe)
 from intelligence_os.run import run as run_pipeline
 
 # Anchored to the package, not the working directory: an installed console
@@ -787,6 +789,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             "vlm_enabled": CONFIG.vlm.enabled,
             "reasoning_calls_today": calls,
             "team": team,
+            # What the detector is currently keeping. `person` is always on and is
+            # deliberately absent from the list — it is not a togglable class.
+            "object_classes": list(CONFIG.detect.object_classes),
+            "available_classes": [c for c in COCO_CLASSES if c != "person"],
+            "class_kinds": {c: kind_for_class(c) for c in COCO_CLASSES
+                            if c != "person"},
         })
 
     def serve_delivery_test(self):
@@ -902,11 +910,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             app["retention_days"] = max(1, int(body['retention_days']))
         if body.get('face_matching') is not None:
             app["face_matching"] = bool(body['face_matching'])
+        rejected = []
+        if body.get('object_classes') is not None:
+            # A class the model does not carry can never fire. Say which ones were
+            # dropped rather than saving a list that quietly watches less than asked.
+            kept, rejected = normalize_object_classes(body['object_classes'])
+            kept = [c for c in kept if c != "person"]
+            if kept:
+                app["object_classes"] = kept
         if app:
             update_app_config(**app)
 
         self.send_json({"ok": True, "retention_days": CONFIG.raw_retention_days,
-                        "face_matching": CONFIG.identity.enabled})
+                        "face_matching": CONFIG.identity.enabled,
+                        "object_classes": list(CONFIG.detect.object_classes),
+                        "rejected_classes": rejected,
+                        # The detector reads its class filter once, at construction
+                        # (detect.py). Unlike rules, this one really does wait.
+                        "classes_need_restart": bool(app.get("object_classes"))})
 
     def serve_rule_toggle(self, name):
         """Enable/disable a rule (M5). Flips the flag; the engine picks it up

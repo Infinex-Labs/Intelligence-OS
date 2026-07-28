@@ -24,10 +24,16 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
-from .config import CONFIG, FRAMES_DIR
+from .config import CONFIG, FRAMES_DIR, kind_for_class
 from .store import Store
 
 DAY = 86400.0
+
+# What repeated proximity is allowed to become, per kind of thing (§7: the
+# distiller interprets, but only as far as the evidence reaches). Proximity to a
+# laptop is use; proximity to a dog is company, not use. Anything unmapped keeps
+# the original verb, so a new kind cannot silently acquire a claim.
+PROXIMITY_VERB = {"object": "uses", "vehicle": "uses", "animal": "accompanied_by"}
 
 
 def prune_old_keyframes(days: Optional[float] = None) -> int:
@@ -65,6 +71,7 @@ class Distiller:
     def __init__(self, store: Store, reasoner=None):
         self.store = store
         self.reasoner = reasoner  # optional callable(change, context)->dict
+        self._verb_cache: dict[str, str] = {}   # object entity -> proximity verb
 
     # --- 0. normalization ----------------------------------------------------
     def normalize(self) -> None:
@@ -158,11 +165,26 @@ class Distiller:
                 rel_ids.append(rid)
         return rel_ids
 
+    def _proximity_verb(self, object_entity_id: str) -> str:
+        """Which verb repeated `near` earns, from what the object actually is.
+
+        The detected class is carried as the object entity's label (detect.py mints
+        it that way), so a renamed entity falls back to the generic 'uses' — an
+        under-claim, which is the safe direction.
+        """
+        verb = self._verb_cache.get(object_entity_id)
+        if verb is None:
+            ent = self.store.get_entity(object_entity_id)
+            kind = kind_for_class((ent["label"] or "").lower() if ent else "")
+            verb = self._verb_cache[object_entity_id] = PROXIMITY_VERB.get(kind, "uses")
+        return verb
+
     # --- 4. relation mining --------------------------------------------------
     def mine_relations(self, min_count: int = 3) -> list[str]:
         """Co-occurrence/proximity over time -> relations.
-        'near' (person,object) repeated -> 'uses'; frequent presence in a location
-        -> 'frequents'."""
+        'near' repeated -> 'uses' for a thing, 'accompanied_by' for an animal;
+        frequent presence in a location -> 'frequents'."""
+        self._verb_cache.clear()   # labels can change between passes
         rel_ids = []
         near_counts: Counter = Counter()
         near_evidence: dict[tuple, list] = defaultdict(list)
@@ -183,9 +205,10 @@ class Distiller:
         for (subj, obj), n in near_counts.items():
             if n < min_count:
                 continue
+            verb = self._proximity_verb(obj)
             for _ in range(n):  # weight grows with evidence count
                 rid = self.store.reinforce_relation(
-                    "relation", subj, "uses", object_entity_id=obj,
+                    "relation", subj, verb, object_entity_id=obj,
                     supporting_observation_ids=near_evidence[(subj, obj)],
                     obs_confidence=0.8)
             rel_ids.append(rid)
@@ -204,6 +227,7 @@ class Distiller:
     # --- orchestration -------------------------------------------------------
     def run(self) -> dict:
         self.store.register_predicate("uses", "person", "object")
+        self.store.register_predicate("accompanied_by", "person", "object")
         self.store.register_predicate("frequents", "person", "any")
         self.store.register_predicate("acquired", "object", "any")
         self.store.register_predicate("removed", "object", "any")

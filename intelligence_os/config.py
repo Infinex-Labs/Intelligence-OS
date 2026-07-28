@@ -103,6 +103,72 @@ class TriggerConfig:
     sensitivity: str = "lazy"
 
 
+# --- Detection vocabulary ----------------------------------------------------
+# The 80 COCO classes the shipped YOLO weights carry, in model order. Kept here
+# rather than read off the model so `object_classes` can be validated at config
+# load time, before ultralytics is imported (and without a GPU spin-up).
+COCO_CLASSES: tuple[str, ...] = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+)
+
+# Kind of thing each class is. This is NOT `entities.type` — that column is
+# CHECK-constrained to person|object and widening it means rebuilding the table.
+# Kind is the behavioural discriminator: it picks the relation verb the distiller
+# may assert, and decides whether cross-day appearance re-ID is honest for the
+# class (see ANIMATE_KINDS below).
+_ANIMALS = frozenset({"bird", "cat", "dog", "horse", "sheep", "cow",
+                      "elephant", "bear", "zebra", "giraffe"})
+_VEHICLES = frozenset({"bicycle", "car", "motorcycle", "airplane", "bus",
+                       "train", "truck", "boat"})
+
+# Kinds that move under their own power (or someone else's). The appearance
+# signature is an HS colour histogram, which separates a red chair from a blue
+# one but NOT one black dog from another, and its cross-day use rests on an
+# assumption stated in detect.py: objects are static. That assumption is false
+# for these, so re-matching them across restarts would merge distinct subjects
+# into one entity — asserting an identity nothing observed. We mint instead.
+ANIMATE_KINDS: frozenset[str] = frozenset({"person", "animal", "vehicle"})
+
+
+def kind_for_class(cls_name: str) -> str:
+    """person | animal | vehicle | object for a COCO class name."""
+    if cls_name == "person":
+        return "person"
+    if cls_name in _ANIMALS:
+        return "animal"
+    if cls_name in _VEHICLES:
+        return "vehicle"
+    return "object"
+
+
+def normalize_object_classes(names) -> tuple[list[str], list[str]]:
+    """(kept, rejected) for a user-supplied class list.
+
+    A class the model does not carry can never be detected, so a typo like 'dogs'
+    would silently watch nothing. Same failure the rule compiler refuses loudly
+    for (§9.2) — the caller surfaces `rejected` rather than dropping it.
+    """
+    kept, rejected, seen = [], [], set()
+    for raw in names or []:
+        n = str(raw).strip().lower()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        (kept if n in COCO_CLASSES else rejected).append(n)
+    return kept, rejected
+
+
 @dataclass
 class DetectConfig:
     yolo_weights: str = field(default_factory=resolve_yolo_weights)
@@ -110,6 +176,7 @@ class DetectConfig:
     iou: float = 0.5
     # COCO classes we treat as "objects of interest" (tracked classes, §B).
     # Everything else relies on the VLM describer for open-vocabulary naming.
+    # Overridable from config.yaml (`object_classes:`) — see apply_app_config.
     object_classes: list[str] = field(default_factory=lambda: [
         "chair", "laptop", "cell phone", "bottle", "cup", "book",
         "backpack", "handbag", "potted plant", "tv", "couch", "bed",
@@ -188,6 +255,17 @@ def apply_app_config(cfg: dict | None = None) -> None:
         CONFIG.raw_retention_days = int(cfg["retention_days"])
     if "face_matching" in cfg:
         CONFIG.identity.enabled = bool(cfg["face_matching"])
+    if "object_classes" in cfg:
+        # An empty/absent list means "keep the defaults"; an explicit list wins.
+        # `person` is always detected and is not part of this list (detect.py adds
+        # it), so silently drop it rather than let it look like a togglable class.
+        kept, rejected = normalize_object_classes(cfg["object_classes"])
+        if rejected:
+            print(f"[config] ignoring unknown detection class(es): "
+                  f"{', '.join(rejected)} — not in the model's 80 COCO classes")
+        kept = [c for c in kept if c != "person"]
+        if kept:
+            CONFIG.detect.object_classes = kept
 
 
 def resolve_cameras(app_config: dict | None = None) -> list[dict]:
