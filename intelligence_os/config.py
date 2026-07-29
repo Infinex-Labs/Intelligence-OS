@@ -197,6 +197,12 @@ class DistillConfig:
     # run it on a short timer so the world-graph fills in visibly. 0 = off.
     # ponytail: fixed interval; switch to change-triggered if a pass gets slow.
     live_interval_s: float = 60.0
+    # How far back a mining pass reads (days; 0 = all of history). A nightly job
+    # that scans everything gets slower every night forever, and the extra it
+    # reads is history whose edges it already mined. Measured back from the
+    # newest observation rather than the wall clock, so a memory that was idle
+    # over the weekend still mines the week it actually has.
+    mine_window_days: float = 120.0
 
 
 @dataclass

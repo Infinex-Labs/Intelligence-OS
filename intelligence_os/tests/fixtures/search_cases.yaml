@@ -191,7 +191,7 @@
   question: "how often does that van come by?"
   gap: G3
   fixed_by: 5
-  baseline: fail          # ask.py never queries the relations table
+  baseline: pass          # Phase 5: counts from the rows, habits from the nightly pass
   plan: {intent: how_often, start: null, end: null, entity_label: "white van"}
   expect_entities: [van]
   expect_min_count: 6
@@ -203,7 +203,7 @@
   question: "does the van come mostly on Tuesdays?"
   gap: G8
   fixed_by: 5
-  baseline: fail          # habits bucket hour-of-day only, no weekday dimension
+  baseline: pass          # Phase 5: habits gained a weekday bucket, `group_by` reads it
   plan: {intent: how_often, start: null, end: null, entity_label: "white van",
          group_by: weekday}
   expect_entities: [van]
@@ -214,7 +214,7 @@
   question: "who was with Priya at the gate?"
   gap: G3
   fixed_by: 5
-  baseline: fail          # scene_snapshots unreachable from ask
+  baseline: pass          # Phase 5: the label is the anchor, the answer is the companion
   plan: {intent: who_with, start: null, end: null, entity_label: priya}
   expect_entities: [visitor]
   expect_result_key: co_presence
@@ -223,16 +223,19 @@
   question: "were two people at the side gate at the same time?"
   gap: G3
   fixed_by: 5
-  baseline: fail
+  baseline: pass          # Phase 5: with no anchor, everyone who shared a frame answers
   plan: {intent: who_with, start: null, end: null, zone: side_gate}
   expect_entities: [priya, visitor]
+  # The courier was at the side gate too, and never in the picture with anyone.
+  # Without this the case would pass off a plain zone query as a co-presence one.
+  forbid_entities: [courier]
   expect_result_key: co_presence
 
 - id: relation_priya_uses_forklift
   question: "does Priya use the forklift?"
   gap: G3
   fixed_by: 5
-  baseline: fail          # 'uses' relation mined but never queried
+  baseline: pass          # Phase 5: answered from the edge, since the forklift has no sightings
   plan: {intent: relations, start: null, end: null, entity_label: priya}
   expect_entities: [forklift]
   expect_result_key: relations

@@ -16,13 +16,17 @@ That is enforced by construction, not by prompting.
         │  LLM: parse to query  │   ← the ONLY thing the model does
         └───────────┬───────────┘
                     │  {intent, start, end, zones[], cameras[],
-                    │   entity_labels[], entity_type, text, order, limit, ...}
+                    │   entity_labels[], entity_type, text, order,
+                    │   limit, group_by, ...}
                     ▼
         ┌───────────────────────┐
-        │  SQL over observations│   ← every fact comes from here
+        │  SQL over memory      │   ← every fact comes from here
+        │  observations ·       │
+        │  habits · snapshots   │
         └───────────┬───────────┘
                     ▼
-     arrivals, departures, durations, keyframes, rule events
+     arrivals, departures, durations, keyframes, rule events,
+     recurrence, who-was-there-too, distilled connections
 ```
 
 The LLM's only job is to turn the English question into a structured query: a
@@ -36,6 +40,19 @@ nothing rather than quietly widening to everything.
 The query also carries an `intent`, which filters nothing. It says which part of
 the result is the answer: "how many sightings at the bay" and "who was at the
 bay" run the identical query, and only one of them is asking for a number.
+
+Three intents go further and read a different part of memory altogether.
+`how_often` reaches the mined habits, `who_with` reaches the settled scene
+inventories, and `relations` reaches the distilled edges. These change *who the
+answer is about* — "who was with Priya" names Priya and answers with somebody
+else — so the names in the query select the anchor, not the answer.
+
+Recurrence is counted from the sightings that matched and corroborated by the
+mined habit, which are two different claims and both are shown. Six sightings
+means it happened six times; six sightings under a confirmed habit means it is
+what that subject *does*. Habits are bucketed on the deployment's local clock —
+the same one answers are rendered in — so "most Tuesdays around 2" means two in
+the afternoon where the cameras are.
 
 Everything in the answer — who arrived, when they left, how long they stayed,
 which rules fired, which keyframes to show — is **aggregated deterministically
@@ -124,6 +141,14 @@ to a stranger's.
 - **It can only answer from what was observed.** If no zone was drawn, nothing
   has a location; if identity is off, people are not the same person across
   days. The assistant will tell you it saw nothing rather than guess.
-- **Question shapes are limited** to what the query tool can express: time
-  window, zone, entity, predicate substring. Counting and comparison questions
-  are not supported yet.
+- **Question shapes are limited** to what the query tool can express: a window,
+  places, cameras, people (or people to leave out), a kind of thing, words to
+  look for, an order, a cap, and one of eight intents. Counting, recurrence,
+  co-presence and connections are supported; open-ended comparison ("was it
+  busier than last week?") is not.
+- **Paraphrase is still lexical.** Words are stemmed and ranked, so "cigarettes"
+  finds "cigarette". Different vocabulary is not reached: `"loitering"` does not
+  match a stored `"standing around, waiting"`.
+- **Recurrence answers lag by a distillation pass** in one respect only — the
+  counts are live, but the mined habit that corroborates them appears after the
+  next nightly run.

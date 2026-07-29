@@ -180,7 +180,10 @@ def build(store: Store, *, scale: int = 0) -> dict:
             owner_entity_id=_first_entity(resolved, ids),
             location_id=zones[zone_key])
 
-    # --- co-presence snapshots (unreachable from ask today, G3) -------------
+    # --- co-presence snapshots (Phase 5 reads these, G3) --------------------
+    # Two of them, and the second one earns its place: one entity alone in the
+    # frame is not company, so it is the case that proves a co-presence answer
+    # is about sharing a frame rather than about appearing in a snapshot.
     store.add_snapshot(zones["side_gate"], [people["priya"], people["visitor"]],
                        timestamp=ANCHOR - 2 * DAY + 35900)
     store.add_snapshot(zones["loading_bay"], [ids["dave"]],
@@ -208,8 +211,33 @@ def build(store: Store, *, scale: int = 0) -> dict:
             "filler_store", {"polygon": [[9, 9], [10, 9], [10, 10]]}, camera_id="cam_dock")
         _pad(store, filler, filler_zone, scale)
 
+    _distil(store)
     return {"zones": zones, "entities": ids, "people": people, "objects": objects,
             "anchor": ANCHOR}
+
+
+def _distil(store: Store) -> None:
+    """Mine the knowledge a real deployment would have mined by now.
+
+    Habits and relations are written by the nightly pass, so a memory that has
+    been running for six weeks HAS them — a fixture without them is not a
+    smaller deployment, it is one where the scheduler never ran. Phase 5 reads
+    these tables, so leaving them empty would have measured search against a
+    system missing a component rather than against the system.
+
+    The two miners are called directly rather than `Distiller.run()`, because
+    `run()` ends in `prune_old_keyframes()`, which deletes files out of the real
+    `FRAMES_DIR`. A test fixture must not reach outside its temp directory, and
+    a keyframe retention sweep is not what is being measured here.
+
+    This writes only to `relations`. Every case that predates Phase 5 reads
+    `observations`, and none of them can see this.
+    """
+    from intelligence_os.distill import Distiller
+    d = Distiller(store)
+    d.normalize()
+    d.mine_habits()
+    d.mine_relations()
 
 
 def _resolve_refs(report: dict, ids: dict) -> dict:

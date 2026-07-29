@@ -16,9 +16,11 @@ import json
 import os
 import sys
 import time
+from collections import Counter, defaultdict
 from typing import Optional
 
 from .config import CONFIG
+from .distill import WEEKDAY_ABBR, bucket_day, bucket_hour, bucket_weekday
 from .store import SCENE_PREFIX, Store
 
 # --- the query form (search plan Phase 4) ------------------------------------
@@ -34,13 +36,18 @@ from .store import SCENE_PREFIX, Store
 #
 # `intent` is the field that does not filter anything. It says what *kind* of
 # answer is wanted, because "how many" and "who" over identical rows are not the
-# same reply. Phase 4 routes `count`; `how_often`, `who_with` and `relations`
-# reach the aggregates they name in Phase 5. They are in the enum now so that the
-# planner's vocabulary does not have to change again when that lands.
+# same reply. Phase 4 routed `count`; Phase 5 routes the three that reach a
+# different table entirely — `how_often` to the mined habits, `who_with` to the
+# scene snapshots, `relations` to the distilled edges. Those three also change
+# *who the answer is about*: "who was with Priya" is a question whose subject is
+# Priya and whose answer is somebody else, which is why they cannot be a filter.
 INTENTS = ("who", "when", "count", "how_often", "who_with", "timeline",
            "last", "relations")
 
 ENTITY_TYPES = ("person", "object", "scene", "any")
+
+# How a recurrence answer is cut up. Only `how_often` reads it.
+GROUP_BYS = ("weekday", "hour", "day")
 
 QUERY_TOOL = {
     "name": "graph_query",
@@ -114,6 +121,12 @@ QUERY_TOOL = {
                 "type": ["integer", "null"],
                 "description": "at most this many subjects in the answer, for 'the "
                 "last two' or 'the top five'. null = no cap",
+            },
+            "group_by": {
+                "type": ["string", "null"], "enum": [*GROUP_BYS, None],
+                "description": "for 'how_often' only: which buckets the pattern is "
+                "asked about. 'weekday' for 'mostly on Tuesdays?', 'hour' for "
+                "'always in the afternoon?', 'day' for a per-date breakdown",
             },
         },
         "required": ["intent", "start", "end", "zones", "entity_labels", "text"],
@@ -195,6 +208,8 @@ def normalize_plan(query: dict) -> dict:
     except (TypeError, ValueError):
         conf = None
 
+    group_by = str(q.get("group_by") or "").strip().lower()
+
     return {
         # An unknown intent behaves as `who` rather than raising. The planner is
         # a language model: a value outside the enum is a typo, and answering the
@@ -213,6 +228,11 @@ def normalize_plan(query: dict) -> dict:
         "min_confidence": conf,
         "order": order if order in ("asc", "desc") else "asc",
         "limit": limit,
+        # Defaulted here rather than at the use site, so the trace shows which
+        # buckets the answer was actually cut into. "Mostly Tuesdays?" and "how
+        # often?" produce the same rows and different answers, and a reader of
+        # the trace should not have to know which default applied.
+        "group_by": group_by if group_by in GROUP_BYS else "weekday",
     }
 
 
@@ -325,28 +345,45 @@ class _SubjectFilter:
     distinction that makes this affordable and made the per-row version not.
     """
 
-    def __init__(self, store: Store, plan: dict, loc_names: dict):
-        self.labels = [s.strip().lower() for s in plan["entity_labels"] if s.strip()]
+    def __init__(self, store: Store, plan: dict, loc_names: dict, *,
+                 only: Optional[set] = None):
+        # `only` is Phase 5's: `who_with` and `relations` ask about one subject
+        # and answer with a different one, so once the companions or the related
+        # things are known, they ARE the permitted set and the plan's labels have
+        # already done their job as the anchor. Passing them back through the
+        # label filter would ask "which of the people with Priya are called
+        # Priya", which is nobody.
+        self.only = None if only is None else set(only)
+        named = self.only is None
+        self.labels = ([s.strip().lower() for s in plan["entity_labels"] if s.strip()]
+                       if named else [])
+        # Exclusions survive, because "who was with her, apart from the courier"
+        # is a constraint on the answer rather than on the anchor.
         self.excludes = [s.strip().lower()
                          for s in plan["exclude_entity_labels"] if s.strip()]
-        self.etype = plan["entity_type"]
+        self.etype = plan["entity_type"] if named else "any"
         self.ids: Optional[list[str]] = None
         self.exclude_ids: Optional[list[str]] = None
         # A positive constraint names the subjects that may answer; an exclusion
         # alone names only the ones that may not. Resolving the positive set for
         # an exclusion-only question would mean listing every subject that
         # exists in order to leave one out, which is the expensive way round.
-        if self.labels or self.etype != "any":
+        if self.only is not None:
+            ids = sorted(self.only)
+            self.ids = ids if len(ids) <= MAX_PUSHED_IDS else None
+        elif self.labels or self.etype != "any":
             ids = [eid for eid, label, etype in self._subjects(store, loc_names)
-                   if self.accepts(label, etype)]
+                   if self.accepts(eid, label, etype)]
             self.ids = ids if len(ids) <= MAX_PUSHED_IDS else None
         elif self.excludes:
             bad = [eid for eid, label, etype in self._subjects(store, loc_names)
-                   if not self.accepts(label, etype)]
+                   if not self.accepts(eid, label, etype)]
             self.exclude_ids = bad if len(bad) <= MAX_PUSHED_IDS else None
 
-    def accepts(self, label: str, etype: str) -> bool:
+    def accepts(self, eid: str, label: str, etype: str) -> bool:
         """Whether a subject, as it will be shown, answers this question."""
+        if self.only is not None and eid not in self.only:
+            return False
         low = label.lower()
         if self.etype != "any" and etype != self.etype:
             return False
@@ -412,7 +449,8 @@ def _limited_subjects(store: Store, plan: dict, filters: dict,
             label = _label_for(eid, row, loc_names)
             if label is None:
                 continue
-            if subjects.accepts(label, row["type"] if row is not None else "scene"):
+            if subjects.accepts(eid, label,
+                                row["type"] if row is not None else "scene"):
                 keep.append(eid)
                 if len(keep) == want:
                     return keep
@@ -439,6 +477,279 @@ def _zone_ids(names, loc_names: dict) -> Optional[list[str]]:
     return [lid for lid, name in loc_names.items() if (name or "").lower() in wanted]
 
 
+# --- the three aggregates (search plan Phase 5) ------------------------------
+#
+# Everything above answers out of `observations`. These three do not, and that is
+# the whole gap: two of the system's three memory kinds — the distilled edges and
+# the scene snapshots — were written every night and never once read back. "How
+# often does that van come by?" was answerable from data that already existed,
+# and the answer was a list of rows.
+#
+# All three keep the same contract as the row path: no claim without its
+# supporting observation ids, and no aggregate that the hard filters did not
+# reach. What changes is which table the evidence starts in.
+
+MAX_HABITS_SHOWN = 6            # per entity; they are ordered by weight
+
+
+def _named(store: Store, ids, loc_names: dict) -> dict:
+    """`{entity_id: (display label, type)}` for a set of ids, in one statement.
+
+    Skips what cannot be named, because `_label_for` returning None is the rule
+    that a subject with no name cannot be an answer — it holds here for exactly
+    the same reason it holds in the row loop.
+    """
+    ids = set(ids)
+    rows = store.get_entities(ids)
+    out = {}
+    for eid in ids:
+        row = rows.get(eid)
+        label = _label_for(eid, row, loc_names)
+        if label is not None:
+            out[eid] = (label, row["type"] if row is not None else "scene")
+    return out
+
+
+def _co_presence(store: Store, plan: dict, subjects: "_SubjectFilter",
+                 loc_ids, loc_names: dict) -> list[dict]:
+    """Who was in frame alongside the subjects the question named.
+
+    The anchor set is re-checked with `accepts()` rather than trusted from
+    `subjects.ids`, and it has to be: `ids` is None both when the question named
+    nobody *and* when it named too many people to bind, and those two mean
+    opposite things. In the row path the loop catches that; here there is no
+    loop over rows to catch it, so the check is done on the snapshot's members
+    directly. Getting this wrong would answer "who was with Priya" with everyone
+    who was ever with anyone.
+    """
+    pairs = store.co_presence(entity_ids=subjects.ids, since=plan["start"],
+                              until=plan["end"], location_ids=loc_ids)
+    if not pairs:
+        return []
+    known = _named(store, [p["entity_id"] for p in pairs]
+                   + [p["with_entity_id"] for p in pairs], loc_names)
+
+    companions: dict[str, dict] = {}
+    for p in pairs:
+        anchor, other = p["entity_id"], p["with_entity_id"]
+        if anchor not in known or other not in known:
+            continue
+        if not subjects.accepts(anchor, *known[anchor]):
+            continue
+        label, etype = known[other]
+        rec = companions.get(other)
+        if rec is None:
+            rec = companions[other] = {
+                "entity_id": other, "label": label, "type": etype,
+                "with": [], "zones": [], "snapshot_ids": [],
+                "first_seen": p["timestamp"], "last_seen": p["timestamp"],
+            }
+        if anchor not in rec["with"]:
+            rec["with"].append(anchor)
+        zone = loc_names.get(p["location_id"], p["location_id"])
+        if zone and zone not in rec["zones"]:
+            rec["zones"].append(zone)
+        if p["snapshot_id"] not in rec["snapshot_ids"]:
+            rec["snapshot_ids"].append(p["snapshot_id"])
+        rec["first_seen"] = min(rec["first_seen"], p["timestamp"])
+        rec["last_seen"] = max(rec["last_seen"], p["timestamp"])
+
+    for rec in companions.values():
+        rec["n_snapshots"] = len(rec["snapshot_ids"])
+        rec["with"] = [{"entity_id": a, "label": known[a][0]} for a in rec["with"]]
+    # Most shared frames first: how often two people are in the picture together
+    # is the closest thing the evidence has to how much they were together.
+    return sorted(companions.values(),
+                  key=lambda r: (-r["n_snapshots"], r["first_seen"]))
+
+
+def _bucket_order(group_by: str):
+    """Tie-break within a bucket count, so equal counts do not order at random.
+
+    Weekdays run Monday-first and hours and dates run in their natural order,
+    which matters because the whole point of a recurrence answer is to be read.
+    """
+    if group_by == "weekday":
+        return lambda b: WEEKDAY_ABBR.index(b)
+    if group_by == "hour":
+        return lambda b: int(b[:-1])
+    return lambda b: b
+
+
+def _recurrence(entities: list[dict], tallies: dict, plan: dict,
+                store: Store, loc_ids, loc_names: dict) -> list[dict]:
+    """How often, and when — computed from the rows, corroborated by the habits.
+
+    Two sources, deliberately, because they fail in opposite directions. The
+    counts come from the observations the question actually matched, so they are
+    exact and available the moment something is recorded. The habits come from
+    the nightly distillation, so they lag — but they are the corroborated,
+    decaying claim that survives across windows, and they carry a weight saying
+    how much repetition is behind them. A count of six with no habit means it
+    happened six times; a count of six with a confirmed habit means it is what
+    this subject does.
+
+    Reporting only the counts would call any six coincidences a pattern.
+    Reporting only the habits would answer "how often?" with nothing at all
+    until the next nightly pass.
+    """
+    group_by = plan["group_by"]
+    order = _bucket_order(group_by)
+    out = []
+    for e in entities:
+        tally = tallies.get(e["entity_id"])
+        if tally is None:
+            continue
+        counts = tally[group_by]
+        groups = [{"bucket": b, "n": n} for b, n in
+                  sorted(counts.items(), key=lambda kv: (-kv[1], order(kv[0])))]
+        span_days = max((e["last_seen"] - e["first_seen"]) / 86400.0, 0.0)
+        n = e["n_observations"]
+        habits = [{
+            "predicate": h["predicate"],
+            "zone": loc_names.get(h["location_id"], h["location_id"]),
+            "weight": round(h["weight"], 3),
+            "status": h["status"],
+            "n_supporting": len(json.loads(h["supporting_observation_ids"])),
+            "last_reinforced_at": h["last_reinforced_at"],
+        } for h in store.habits(entity_ids=[e["entity_id"]],
+                                location_ids=loc_ids)[:MAX_HABITS_SHOWN]]
+        hours = tally["hour"]
+        top_hour = max(hours.items(), key=lambda kv: (kv[1], -int(kv[0][:-1]))) \
+            if hours else None
+        out.append({
+            "entity_id": e["entity_id"], "label": e["label"],
+            "n_sightings": n,
+            # Distinct days, not rows. Ten frames of one visit is one visit, and
+            # "how often" is a question about visits.
+            "n_occasions": len(tally["days"]),
+            "first_seen": e["first_seen"], "last_seen": e["last_seen"],
+            "span_days": round(span_days, 2),
+            "per_week": round(n / max(span_days / 7.0, 1.0), 2),
+            "group_by": group_by,
+            "groups": groups,
+            "top": groups[0] if groups else None,
+            "top_hour": {"bucket": top_hour[0], "n": top_hour[1]} if top_hour else None,
+            "habits": habits,
+        })
+    return out
+
+
+def _relations(store: Store, plan: dict, subjects: "_SubjectFilter",
+               loc_ids, cam_ids, loc_names: dict) -> tuple[list[dict], dict]:
+    """The distilled edges these subjects sit on, and the evidence under them.
+
+    Returns (edges, evidence-by-other-end). The second half is why this is not
+    just a table read: the thing at the far end of a 'uses' edge is usually an
+    object that has no observations *of its own* — a forklift is never the
+    subject of a row, it is only ever what somebody was near. So its entry is
+    built from the edge's own `supporting_observation_ids`, which is the same
+    provenance the graph UI walks when an operator asks why a belief exists.
+
+    The window and the zone filter reach the edge through that evidence rather
+    than through the edge's own columns, and that is the right end to filter
+    from: an edge has one location and a lifetime of reinforcement behind it,
+    so asking whether it falls in a window is only answerable by asking where
+    its evidence does.
+    """
+    edges = store.relation_edges(subject_entity_ids=subjects.ids,
+                                 kinds=["relation", "event"])
+    if not edges:
+        return [], {}
+
+    anchors = _named(store, [e["subject_entity_id"] for e in edges], loc_names)
+    kept = [e for e in edges
+            if e["subject_entity_id"] in anchors
+            and subjects.accepts(e["subject_entity_id"],
+                                 *anchors[e["subject_entity_id"]])]
+    if not kept:
+        return [], {}
+
+    supporting = {e["relation_id"]: json.loads(e["supporting_observation_ids"])
+                  for e in kept}
+    rows = _rows_by_id(store, {oid for ids in supporting.values() for oid in ids},
+                       plan, loc_ids, cam_ids)
+
+    # The far end: a thing, or failing that a place. A 'frequents' edge has no
+    # object at all, and the place IS the answer to "where does she go".
+    far = {e["relation_id"]: (e["object_entity_id"] or
+                              (SCENE_PREFIX + e["location_id"] if e["location_id"]
+                               else None)) for e in kept}
+    known = _named(store, [f for f in far.values() if f], loc_names)
+
+    out, evidence = [], {}
+    for e in kept:
+        other = far[e["relation_id"]]
+        if other not in known:
+            continue
+        ev = [rows[oid] for oid in supporting[e["relation_id"]] if oid in rows]
+        if not ev:
+            continue        # every trace of it falls outside the window asked about
+        out.append({
+            "subject_entity_id": e["subject_entity_id"],
+            "subject_label": anchors[e["subject_entity_id"]][0],
+            "predicate": e["predicate"], "kind": e["kind"],
+            "object_entity_id": other, "object_label": known[other][0],
+            "zone": loc_names.get(e["location_id"], e["location_id"]),
+            "weight": round(e["weight"], 3), "status": e["status"],
+            "n_supporting": len(ev),
+            "observation_ids": [o["observation_id"] for o in ev][:8],
+        })
+        evidence.setdefault(other, []).extend(ev)
+    return out, evidence
+
+
+def _rows_by_id(store: Store, ids, plan: dict, loc_ids, cam_ids) -> dict:
+    """Observation rows for these ids that also satisfy the plan's hard filters.
+
+    Chunked, because the ids come from however much evidence a belief has
+    accumulated and SQLite binds one variable per id. Chunking is safe where
+    narrowing a ranked list would not be: this is a set membership test, so the
+    union of the chunks is the answer the single query would have given.
+    """
+    ids = list(ids)
+    out = {}
+    for i in range(0, len(ids), MAX_PUSHED_IDS):
+        for row in store.observations(
+                observation_ids=ids[i:i + MAX_PUSHED_IDS],
+                since=plan["start"], until=plan["end"], location_ids=loc_ids,
+                camera_ids=cam_ids, min_confidence=plan["min_confidence"],
+                exclude_predicates=plan["exclude_predicates"]):
+            out[row["observation_id"]] = row
+    return out
+
+
+def _entities_from_evidence(evidence: dict, loc_names: dict,
+                            store: Store) -> list[dict]:
+    """Entity entries built from supporting rows rather than from own sightings.
+
+    Same shape the row loop produces, so a caller cannot tell which path an
+    answer came down — and should not have to. What differs is the meaning of
+    `n_observations`: here it counts the rows that *evidence* the claim, not
+    the times the subject was seen.
+    """
+    known = _named(store, evidence, loc_names)
+    out = []
+    for eid, rows in evidence.items():
+        if eid not in known:
+            continue
+        label, etype = known[eid]
+        times = [r["timestamp"] for r in rows]
+        keyframes = []
+        for r in rows:
+            url = _kf(r["source_ref"])
+            if url and url not in keyframes:
+                keyframes.append(url)
+        out.append({
+            "entity_id": eid, "label": label, "type": etype,
+            "first_seen": min(times), "last_seen": max(times),
+            "duration_s": round(max(times) - min(times), 1),
+            "n_observations": len(rows), "states": [], "rule_events": [],
+            "keyframes": keyframes[:4], "match_score": None,
+        })
+    return out
+
+
 def execute(store: Store, query: dict) -> dict:
     """Deterministic aggregation over observation rows. Every claim in the output
     is a row (or an aggregate of rows) the caller can inspect."""
@@ -450,6 +761,32 @@ def execute(store: Store, query: dict) -> dict:
     loc_ids = _zone_ids(plan["zones"], loc_names)
     cam_ids = plan["cameras"] or None
     subjects = _SubjectFilter(store, plan, loc_names)
+
+    # Phase 5's two re-aimings. Both run before the row query, because both
+    # change *whose* rows the answer is about: the labels in the plan named the
+    # anchor, and the answer is whatever the anchor turned out to be connected
+    # to. Everything downstream is unchanged — the same aggregation, over a
+    # different set of subjects.
+    co_presence = relation_edges = None
+    if plan["intent"] == "who_with":
+        co_presence = _co_presence(store, plan, subjects, loc_ids, loc_names)
+        subjects = _SubjectFilter(store, plan, loc_names,
+                                  only={c["entity_id"] for c in co_presence})
+    elif plan["intent"] == "relations":
+        relation_edges, evidence = _relations(store, plan, subjects, loc_ids,
+                                              cam_ids, loc_names)
+        # The row path cannot answer this one. The far end of a 'uses' edge is
+        # an object, and an object is never the *subject* of an observation —
+        # a forklift has no sightings of its own, only rows about people near
+        # it. So the entities are built from the edge's evidence instead.
+        entities = _entities_from_evidence(evidence, loc_names, store)
+        entities.sort(key=lambda e: (-e["n_observations"], e["first_seen"]))
+        if plan["limit"] is not None:
+            entities = entities[:plan["limit"]]
+        return {"query": query, "plan": plan,
+                "total_observations": sum(e["n_observations"] for e in entities),
+                "entities": entities, "ranked": False,
+                "relations": relation_edges}
 
     # Phase 2: the words go to the lexical index, which stems and ranks. The two
     # word fields differ in how strict they are, and deliberately so:
@@ -508,6 +845,12 @@ def execute(store: Store, query: dict) -> dict:
 
     per_entity: dict[str, dict] = {}
     rejected: set[str] = set()      # ids already judged: unresolvable, or wrong label
+    # Kept beside the entities rather than on them, so a question that is not
+    # about recurrence carries none of this in its payload.
+    want_recurrence = plan["intent"] == "how_often"
+    tallies: dict[str, dict] = defaultdict(
+        lambda: {"days": set(), "weekday": Counter(), "hour": Counter(),
+                 "day": Counter()})
     for o in rows:
         hit = scores.get(o["observation_id"])
         eid = o["subject_entity_id"]
@@ -524,7 +867,7 @@ def execute(store: Store, query: dict) -> dict:
             # Still checked here even when SQL already narrowed by it: the
             # subject filter is defined on the displayed name and type, and this
             # loop is where both are decided.
-            if not subjects.accepts(label, etype):
+            if not subjects.accepts(eid, label, etype):
                 rejected.add(eid)
                 continue
             ent = per_entity[eid] = {
@@ -544,6 +887,16 @@ def execute(store: Store, query: dict) -> dict:
             ent["match_score"] = hit if prev is None else max(prev, hit)
         ent["first_seen"] = min(ent["first_seen"], o["timestamp"])
         ent["last_seen"] = max(ent["last_seen"], o["timestamp"])
+        if want_recurrence:
+            # Bucketed on the deployment's clock, the same one `distill` cuts
+            # habits with and `_facts` renders times in. A pattern reported in a
+            # timezone nobody works in is not a pattern anybody recognises.
+            ts, tally = o["timestamp"], tallies[eid]
+            day = bucket_day(ts)
+            tally["days"].add(day)
+            tally["day"][day] += 1
+            tally["weekday"][bucket_weekday(ts)] += 1
+            tally["hour"][f"{bucket_hour(ts):02d}h"] += 1
         pred = o["predicate"]
         if pred.startswith("rule_fired:"):
             ent["rule_events"].append({
@@ -602,6 +955,15 @@ def execute(store: Store, query: dict) -> dict:
         # "How many" and "who" run the identical query — what differs is which
         # part is the reply, and a caller cannot infer that from the rows.
         result["count"] = total
+    if want_recurrence:
+        result["recurrence"] = _recurrence(entities, tallies, plan, store,
+                                           loc_ids, loc_names)
+    if co_presence is not None:
+        # Carried whole, not narrowed to the entities above. A companion whose
+        # own sightings fall outside the window still shared the frame, and the
+        # snapshot is the evidence of that — dropping them here would answer
+        # "nobody" to a question the snapshot can answer.
+        result["co_presence"] = co_presence
     return result
 
 
@@ -649,6 +1011,44 @@ def _facts(result: dict) -> dict:
         # Named separately from `total_observations` because the question asked
         # for it. Same number, but the model is being told which one is the reply.
         facts["count"] = result["count"]
+    # Phase 5's aggregates, projected the same way: pre-formatted, no ids. The
+    # narrator is given the pattern already computed rather than the rows to
+    # count, for the same reason it is given formatted times — it phrases these,
+    # it cannot recompute them wrong.
+    for r in result.get("recurrence") or []:
+        facts.setdefault("recurrence", []).append({
+            "who": r["label"],
+            "times_seen": r["n_sightings"],
+            "separate_days": r["n_occasions"],
+            "over_days": r["span_days"],
+            "roughly_per_week": r["per_week"],
+            "grouped_by": r["group_by"],
+            "most_often": (f"{r['top']['bucket']} ({r['top']['n']} of "
+                           f"{r['n_sightings']})") if r["top"] else None,
+            "usual_hour": r["top_hour"]["bucket"] if r["top_hour"] else None,
+            # Weight and status included on purpose: a candidate habit is a
+            # weaker claim than a confirmed one, and the prose should be able
+            # to say so instead of stating both as fact.
+            "mined_habits": [f"{h['predicate']} ({h['status']}, weight "
+                             f"{h['weight']}, {h['n_supporting']} observations)"
+                             for h in r["habits"]],
+        })
+    for c in result.get("co_presence") or []:
+        facts.setdefault("seen_together", []).append({
+            "who": c["label"],
+            "with": [w["label"] for w in c["with"]],
+            "times_in_frame_together": c["n_snapshots"],
+            "where": c["zones"],
+            "first_seen": t(c["first_seen"]), "last_seen": t(c["last_seen"]),
+        })
+    for e in result.get("relations") or []:
+        facts.setdefault("connections", []).append({
+            "subject": e["subject_label"],
+            "connection": e["predicate"].replace("_", " "),
+            "to": e["object_label"],
+            "confidence": f"{e['status']}, weight {e['weight']}",
+            "supported_by": e["n_supporting"],
+        })
     return facts
 
 
@@ -699,6 +1099,23 @@ def render_text(result: dict) -> str:
         lines += [result["answer"], ""]
     if result.get("count") is not None:
         lines.append(f"count: {result['count']} sighting(s).")
+    for r in result.get("recurrence") or []:
+        top = f", most often {r['top']['bucket']} ({r['top']['n']})" if r["top"] else ""
+        hour = f" around {r['top_hour']['bucket']}" if r["top_hour"] else ""
+        lines.append(f"how often: {r['label']} — {r['n_sightings']} sighting(s) on "
+                     f"{r['n_occasions']} day(s) over {r['span_days']}d"
+                     f"{top}{hour}.")
+        for h in r["habits"]:
+            lines.append(f"  habit: {h['predicate']}  weight {h['weight']} "
+                         f"({h['status']}, {h['n_supporting']} obs)")
+    for c in result.get("co_presence") or []:
+        with_who = ", ".join(w["label"] for w in c["with"])
+        lines.append(f"with: {c['label']} — alongside {with_who} in "
+                     f"{c['n_snapshots']} frame(s) @ {', '.join(c['zones'])}")
+    for e in result.get("relations") or []:
+        lines.append(f"edge: {e['subject_label']} {e['predicate']} "
+                     f"{e['object_label']}  weight {e['weight']} "
+                     f"({e['status']}, {e['n_supporting']} obs)")
     lines.append(f"{len(result['entities'])} entit(y/ies), "
                  f"{result['total_observations']} observation(s) in window.")
     for e in result["entities"]:

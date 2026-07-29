@@ -1143,6 +1143,17 @@ class Store:
         ).fetchone()
         return row["t"] if row and row["t"] is not None else None
 
+    def newest_observation_at(self) -> Optional[float]:
+        """When memory last recorded anything, or None if it never has.
+
+        Distillation measures its scan window back from here rather than from
+        `now()`, so an outage does not present as a routine ending.
+        `MAX(timestamp)` is answered off the tail of idx_obs_time_loc rather
+        than by scanning.
+        """
+        row = self.conn.execute("SELECT MAX(timestamp) t FROM observations").fetchone()
+        return row["t"] if row and row["t"] is not None else None
+
     # --- scene descriptions (search plan Phase 1) ----------------------------
     def add_scene_description(self, *, model: str, raw: dict, text: str,
                               timestamp: Optional[float] = None,
@@ -1232,12 +1243,21 @@ class Store:
                           location_id: Optional[str] = None,
                           supporting_observation_ids: Sequence[str] = (),
                           obs_confidence: float = 1.0,
+                          times: int = 1,
                           at: Optional[float] = None) -> str:
         """Create-or-strengthen a weighted edge (§7). Bounded additive update
-        scaled by observation confidence; promotes to confirmed past threshold."""
+        scaled by observation confidence; promotes to confirmed past threshold.
+
+        `times` applies the increment n times in one statement, for a caller
+        that has already counted its evidence. It is exactly equivalent to n
+        calls — the update is additive and the cap is a `min`, so
+        `min(cap, w + n*inc)` is where n applications land — and it is the
+        difference between one write and one per observation (search plan
+        Phase 5, G9).
+        """
         cfg = CONFIG.distill
         at = at or now()
-        inc = cfg.weight_increment * max(0.0, min(1.0, obs_confidence))
+        inc = cfg.weight_increment * max(0.0, min(1.0, obs_confidence)) * max(1, int(times))
         existing = self.find_relation(kind, subject_entity_id, predicate,
                                       object_entity_id, location_id)
         with self.tx() as c:
@@ -1310,6 +1330,128 @@ class Store:
             q += " AND kind=?"; args.append(kind)
         q += " ORDER BY weight DESC"
         return self.conn.execute(q, args).fetchall()
+
+    # --- distilled knowledge, queried (search plan Phase 5) -------------------
+    #
+    # `relations()` above answers "everything about this one subject", which is
+    # what the graph UI expands. A question arrives with a *set* of subjects and
+    # a window, so it needs the same table asked the other way round. Same
+    # `None` = no filter / `[]` = matches nothing convention as `_obs_where`,
+    # because the same plan feeds both and a zone list that resolved to nothing
+    # must not mean "anywhere" here and "nowhere" there.
+    def relation_edges(self, *, subject_entity_ids: Optional[Sequence[str]] = None,
+                       object_entity_ids: Optional[Sequence[str]] = None,
+                       kinds: Optional[Sequence[str]] = None,
+                       predicate_prefixes: Optional[Sequence[str]] = None,
+                       location_ids: Optional[Sequence[str]] = None,
+                       min_weight: float = 0.0,
+                       status: Optional[Sequence[str]] = None,
+                       include_suppressed: bool = False) -> list[sqlite3.Row]:
+        """Distilled edges matching every filter given, strongest first.
+
+        Suppressed edges are excluded by default and that default is the point:
+        `suppress_relation` is an operator saying a belief is wrong, so it must
+        not come back as an answer to a question phrased differently.
+        """
+        conds = ["weight>=?"]
+        args: list[Any] = [min_weight]
+
+        def any_of(col: str, values) -> str:
+            vals = list(values)
+            if not vals:
+                return "0"                  # no permitted values -> no rows
+            args.extend(vals)
+            return f"{col} IN ({','.join('?' * len(vals))})"
+
+        for col, values in (("subject_entity_id", subject_entity_ids),
+                            ("object_entity_id", object_entity_ids),
+                            ("kind", kinds), ("location_id", location_ids),
+                            ("status", status)):
+            if values is not None:
+                conds.append(any_of(col, values))
+        if predicate_prefixes is not None:
+            prefixes = list(predicate_prefixes)
+            if not prefixes:
+                conds.append("0")
+            else:
+                conds.append("(" + " OR ".join(
+                    "predicate LIKE ? ESCAPE '\\'" for _ in prefixes) + ")")
+                args.extend(self._like_literal(p)[1:] for p in prefixes)
+        if not include_suppressed:
+            conds.append("status<>'suppressed'")
+        return self.conn.execute(
+            "SELECT * FROM relations WHERE " + " AND ".join(conds)
+            + " ORDER BY weight DESC, predicate", args).fetchall()
+
+    def habits(self, *, entity_ids: Optional[Sequence[str]] = None,
+               location_ids: Optional[Sequence[str]] = None,
+               min_weight: float = 0.0,
+               status: Optional[Sequence[str]] = None) -> list[sqlite3.Row]:
+        """Mined temporal patterns — `kind='habit'` — for these subjects.
+
+        Named separately from `relation_edges` because a habit is what "how
+        often" is actually asking about, and a caller should not have to know
+        that habits and 'uses' edges share a table.
+        """
+        return self.relation_edges(subject_entity_ids=entity_ids,
+                                   location_ids=location_ids, kinds=["habit"],
+                                   min_weight=min_weight, status=status)
+
+    def co_presence(self, *, entity_ids: Optional[Sequence[str]] = None,
+                    since: Optional[float] = None, until: Optional[float] = None,
+                    location_ids: Optional[Sequence[str]] = None) -> list[dict]:
+        """Who shared a place and a moment with whom, as one row per pair.
+
+        The evidence is `scene_snapshots` rather than "both were seen in the
+        same zone within N seconds", and the difference matters: a snapshot is
+        one frame's settled inventory, so two entities in it were *actually in
+        the picture together*. Two observations minutes apart in the same zone
+        are two facts about one place, not a fact about two people.
+
+        The place and the window are pushed into SQL; membership is not, because
+        `present_entity_ids` is a JSON list and a `LIKE '%id%'` over it would be
+        a substring test dressed up as a join. The window is the filter that
+        does the work — reading one day's snapshots to pair them up is cheap,
+        and reading every snapshot ever taken to find one pair is not.
+
+        `entity_ids` selects the ANCHORS, not the answer: the pairs returned are
+        (anchor, companion), so a question naming one person gets back the
+        people who were with them, which is what it asked.
+        """
+        conds, args = [], []
+        if since is not None:
+            conds.append("timestamp>=?"); args.append(since)
+        if until is not None:
+            conds.append("timestamp<=?"); args.append(until)
+        if location_ids is not None:
+            locs = list(location_ids)
+            if not locs:
+                return []
+            conds.append(f"location_id IN ({','.join('?' * len(locs))})")
+            args.extend(locs)
+        q = "SELECT * FROM scene_snapshots"
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        anchors = None if entity_ids is None else set(entity_ids)
+
+        pairs: list[dict] = []
+        for snap in self.conn.execute(q + " ORDER BY timestamp", args):
+            present = json.loads(snap["present_entity_ids"])
+            if len(present) < 2:
+                continue          # alone in the frame is not company
+            for a in present:
+                if anchors is not None and a not in anchors:
+                    continue
+                for b in present:
+                    if a == b:
+                        continue
+                    pairs.append({
+                        "entity_id": a, "with_entity_id": b,
+                        "location_id": snap["location_id"],
+                        "timestamp": snap["timestamp"],
+                        "snapshot_id": snap["snapshot_id"],
+                    })
+        return pairs
 
     # --- predicate schema (legal triples, §6) --------------------------------
     def register_predicate(self, predicate: str, subject_type: str = "any",

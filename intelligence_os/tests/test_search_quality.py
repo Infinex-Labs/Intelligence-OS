@@ -49,9 +49,10 @@ SUPPORTED_PLAN_FIELDS = {
     # it is just no longer what the planner emits.
     "intent", "zones", "cameras", "entity_labels", "exclude_entity_labels",
     "entity_type", "exclude_predicates", "min_confidence", "order", "limit",
-    # `group_by` is deliberately NOT here. `intent: how_often` now runs rather
-    # than being rejected, but a weekday bucket is Phase 5's, and listing a field
-    # the engine ignores is exactly the silent widening this set exists to catch.
+    # Phase 5. `group_by` joins the set now that it changes the answer rather
+    # than being ignored: it chooses which buckets a recurrence is cut into, so
+    # "mostly on Tuesdays?" and "how often?" no longer return the same thing.
+    "group_by",
 }
 
 RECALL_KS = (1, 5, 20)

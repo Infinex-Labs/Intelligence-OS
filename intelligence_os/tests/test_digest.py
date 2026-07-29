@@ -8,6 +8,7 @@ import tempfile
 
 from intelligence_os.store import Store
 from intelligence_os.digest import build, feedback
+from intelligence_os.distill import bucket_hour
 
 DAY = 86400.0
 
@@ -16,14 +17,23 @@ def main():
     store = Store(os.path.join(tempfile.mkdtemp(), "test.db"))
     bay = store.upsert_location("loading_bay", {"polygon": [[0, 0], [1, 0], [1, 1]]})
 
-    # p1 is OLD (created before the window) with a mined 10h habit at the bay
+    # p1 is OLD (created before the window) with a mined habit at the bay,
+    # covering the hour its 10h-past-midnight-UTC sighting falls in LOCALLY.
+    #
+    # Hours used to be written here as literals because both sides of the
+    # comparison were UTC. Since Phase 5 they are the deployment's local hours
+    # (`distill.bucket_hour`), so the literal would only be right on a machine
+    # in UTC — the test would pass in CI and fail on the developer's laptop
+    # while the code was correct on both. Asking for the bucket is what makes
+    # this assert the behaviour rather than the timezone.
     p1 = store.create_entity("person", label="Regular")
     store.conn.execute("UPDATE entities SET created_at=? WHERE entity_id=?", (0.0, p1))
     store.conn.commit()
-    base = 30 * DAY  # windows land mid-epoch; hours are UTC
+    base = 30 * DAY  # windows land mid-epoch
     o1 = store.add_observation(p1, "present", location_id=bay, timestamp=base + 10 * 3600)
-    store.reinforce_relation("habit", p1, "present_around_10h", location_id=bay,
-                             supporting_observation_ids=[o1])
+    store.reinforce_relation("habit", p1,
+                             f"present_around_{bucket_hour(base + 10 * 3600):02d}h",
+                             location_id=bay, supporting_observation_ids=[o1])
     # relation created_at is 'now' (wall clock) — pin event-band inputs instead:
     store.conn.execute("UPDATE relations SET created_at=? WHERE kind='habit'", (base,))
     store.conn.commit()
@@ -31,7 +41,8 @@ def main():
     since = base + 40 * DAY
     now = since + DAY
 
-    # in-window: p1 present at 03h (no habit near 3) and at 10h (habitual)
+    # in-window: p1 present 3h past midnight UTC (7h off the habit, whatever
+    # local hour that lands on) and at the habitual hour
     store.add_observation(p1, "present", location_id=bay, timestamp=since + 3 * 3600,
                           source_ref="/x/kf1.jpg")
     store.add_observation(p1, "present", location_id=bay, timestamp=since + 10 * 3600)
@@ -53,11 +64,12 @@ def main():
     r = d["rule_fired"][0]
     assert r["title"] == "Rule fired: linger" and r["keyframe"] == "/keyframe/rule1.jpg", r
 
-    # band 2: exactly two unusual items — 03h deviation + first-seen p2.
-    # The 10h presence matches the habit -> NOT flagged. p2 has no habit baseline
-    # -> no unusual_hour item for it (value before baseline).
+    # band 2: exactly two unusual items — the off-hour deviation + first-seen p2.
+    # The habitual-hour presence matches the habit -> NOT flagged. p2 has no
+    # habit baseline -> no unusual_hour item for it (value before baseline).
+    odd = bucket_hour(since + 3 * 3600)
     sigs = {i["signature"] for i in d["unusual"]}
-    assert sigs == {f"unusual_hour:{p1}:{bay}:03", f"first_seen:{p2}"}, sigs
+    assert sigs == {f"unusual_hour:{p1}:{bay}:{odd:02d}", f"first_seen:{p2}"}, sigs
     uh = next(i for i in d["unusual"] if i["signature"].startswith("unusual_hour"))
     assert uh["label"] == "Regular" and uh["keyframe"] == "/keyframe/kf1.jpg", uh
 

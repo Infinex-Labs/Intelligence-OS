@@ -1,6 +1,6 @@
 # Search & Retrieval Architecture Plan
 
-**Status:** Phases 0–4 landed; 5–8 still proposal. See
+**Status:** Phases 0–5 landed; 6–8 still proposal. See
 [`search-baseline.md`](search-baseline.md) for the scored trajectory.
 **Scope:** the query/retrieval layers of Intelligence OS — `ask.py`, the search
 surface of `store.py`, the memory-write path in `run.py`/`vlm.py`, and the
@@ -132,8 +132,9 @@ question
 │  · entity_type · exclude[] · text cue · limit    │
 └──────────────────────────────────────────────────┘
    │
-   ├─── intent = how_often ──────► habits table      (Phase 5)
-   ├─── intent = who_with ───────► snapshots table   (Phase 5)
+   ├─── intent = how_often ──────► habits + row counts (Phase 5)
+   ├─── intent = who_with ───────► snapshots table     (Phase 5)
+   ├─── intent = relations ──────► distilled edges     (Phase 5)
    │
    ▼  intent = who / when / count / timeline / last
 ┌──────────────────────────────────────────────────┐
@@ -646,7 +647,7 @@ which measures the engine and not the planner. That gap is unchanged from Phase
 
 ---
 
-### Phase 5 — Wire up habits and co-presence
+### Phase 5 — Wire up habits and co-presence ✅ DONE
 
 **Why.** G3, G8. Two of three memory kinds are unreachable. The README's
 *"How often does that van come by?"* and *"Who was the person my wife let in on
@@ -690,6 +691,76 @@ predicate-string consumer need checking. New predicates go through the existing
 weekday habits accumulate from the ship date.
 
 **Done when.** Both README questions pass in Phase 0, with provenance attached.
+
+**Result.** Both pass, and so do the other three.
+
+| | Phase 4 | Phase 5 |
+|---|---|---|
+| cases passing | 23/32 | **28/32** |
+| silent failures | 5/32 | **4/32** |
+| recall@1 / recall@5 / MRR | 0.623 / 0.737 / 0.697 | **0.767 / 0.850 / 0.850** |
+| tests | 266 | **312** |
+| p95, the 21 cases Phase 3 can also run | — | 79.23 → **76.47 ms** |
+
+Every remaining failure is a `paraphrase_*` case, and every one of them is
+Phase 6's.
+
+**Decisions recorded.**
+
+- **The timezone question is answered: local.** It was left open in §8.2 and is
+  now closed in favour of the deployment's clock, because that is the clock the
+  answers already render in — a habit reported in a timezone nobody works in is
+  not a pattern anybody recognises. `time.localtime` reads `TZ`, so a deployment
+  states its timezone the way every other unix service does. One definition
+  (`distill.bucket_hour` / `bucket_weekday` / `bucket_day`), three callers.
+- **A recurrence is counted from the rows *and* corroborated by the habits.**
+  The spec routes `how_often` to the habits table. Habits alone would answer
+  "how often?" with nothing until the next nightly pass — over the window
+  someone asking is most likely to mean — so the counts come from the matched
+  observations and the mined habit rides along with its weight, status and
+  supporting ids. Counts say it happened; the habit says it is a routine.
+- **`who_with` and `relations` re-aim the subject filter.** Both name an anchor
+  and answer with something else, so once the companions or the related things
+  are resolved they replace the label filter entirely. Exclusions survive the
+  swap, because "who was with her, apart from the courier" constrains the answer
+  rather than the anchor.
+- **The far end of a relation is built from the edge's own evidence.** A
+  forklift is never the *subject* of an observation — it is only ever what
+  somebody was near — so the row path cannot reach it however the filters are
+  set. Its entry comes from `supporting_observation_ids`, which is the same
+  provenance the graph UI walks. The window and zone filters reach the belief
+  through that evidence, which is the only end they can reach it from.
+- **The eval corpus now runs a mining pass.** A six-week-old memory has mined
+  edges; a fixture without them is one where the scheduler never ran. The two
+  miners are called directly rather than `Distiller.run()`, which ends in
+  `prune_old_keyframes()` and would delete files out of the real `FRAMES_DIR`.
+
+**Not in the spec, done anyway.**
+
+- `intent=relations` was in the enum but had no route. It has one, including
+  location-valued edges, so "where does she go" is answered by a `frequents`
+  edge with the zone as the far end.
+- `group_by` gained `hour` and `day` alongside `weekday`, and is defaulted in
+  `normalize_plan` so the trace records which buckets actually ran.
+- Two tests were asserting the timezone rather than the behaviour — `test_pipeline`
+  on the literal `09h`, `test_digest` on `unusual_hour:…:03`. Both were only ever
+  right on a machine in UTC. They ask for the bucket now.
+
+**Measured, for G9.** One weighted write took **0.11 s** on the fixture's
+worst-case edge (100,000 rows on one entity at one location). The loop it
+replaces took 227 s for the first 2,000 of its 100,000 iterations, because each
+one re-read and rewrote the whole provenance list — about three hours,
+extrapolated, for one edge.
+
+**Still scanning elsewhere.** `rules.py:228` is unchanged. So is the
+aggregate-in-the-loop that makes `entity_type_objects_only` and `limit_last_two`
+cost ~950 ms at 100k rows; Phase 5 did not need it, and it is still the lever
+that would remove them.
+
+**Not done here.** The plan-accuracy suite against a live key is still not
+written. `intent` now decides which *table* an answer comes out of, so a planner
+that picks the wrong one returns a confidently wrong shape rather than a
+confidently wrong filter — the gap is worth more than it was.
 
 ---
 
@@ -845,7 +916,7 @@ change you rely on), then **4 → 5** for the largest visible win, then **6 → 
 | "**last five** times" | ❌ (G5) | ✅ Phase 4 |
 | 6 months of footage | ⚠️ degrading (G6) | ✅ sub-second |
 
-**Three of the README's headline questions currently fail. All three pass at
+**Three of the README's headline questions used to fail. All three pass as of
 Phase 5.**
 
 ### 6.2 Metrics
@@ -891,9 +962,10 @@ now. Tracked in `docs/search-baseline.md`, one row per phase:
 
 1. **Phase 6 dependency** — is a ~90MB local model acceptable in the optional
    block? *Blocks Phase 6 only; 0–5 proceed regardless.*
-2. **Habit timezone** — bucket habits in deployment-local time (matches how
-   answers are read) or keep UTC and convert at render? Recommend local, since
-   "most Tuesdays around 2" is a local-time claim. *Blocks Phase 5.*
+2. ~~**Habit timezone**~~ — **answered: local**, taken in Phase 5 on the stated
+   recommendation, since "most Tuesdays around 2" is a local-time claim and
+   local is the clock the answers already render in. `time.localtime` reads
+   `TZ`. One definition in `distill.py`; `digest.py` and `ask.py` call it.
 3. **Row-volume ceiling** — cap observations emitted per VLM description? Suggest
    a configurable cap, default generous. *Phase 1 tuning, not a blocker.*
 4. **Phase 8** — defer pending the scorecard. Recommend yes, defer.

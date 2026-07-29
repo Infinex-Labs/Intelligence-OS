@@ -11,6 +11,7 @@ never overwrite, so the trajectory stays in version control.
 | **2 — lexical index** | **17/32** | **14/32** | **72.7%** | 72.7% | **0.727** | 100.0% | 609 | 1878 |
 | **3 — filtering in the database** | 17/32 | 14/32 | 72.7% | 72.7% | 0.727 | 100.0% | **0.49** | **66.73** |
 | **4 — a wider query form** | **23/32** | **5/32** | 62.3% | **73.7%** | 0.697 | 100.0% | 20.43 | 460.08 |
+| **5 — habits and co-presence** | **28/32** | **4/32** | **76.7%** | **85.0%** | **0.850** | 100.0% | 0.77 | 78.49 |
 
 Latency measured at corpus scale **100000** observations. Reproduce with:
 
@@ -73,8 +74,9 @@ paired rather than compared to the row.
 - **recall / MRR** — entity-level, over the cases that name expected entities.
   Through Phase 1 the ordering was `first_seen`, so MRR measured the absence of
   ranking rather than its quality. Phase 2 orders word questions by bm25, and
-  window questions still read as a timeline. They coincided through Phase 3 and
-  separate at Phase 4 — see "Why recall@1 fell while recall@5 rose" below. Note
+  window questions still read as a timeline. They coincided through Phase 3,
+  separated at Phase 4 and converged again at Phase 5 — see "Why recall@1 fell
+  while recall@5 rose" and "recall@1 recovered, and why" below. Note
   that the *scored set grows* as phases land: a case the engine cannot run is
   not scored at all, so these averages are only comparable alongside the case
   count, never on their own.
@@ -216,6 +218,142 @@ subjects are then aggregated. Here one of the two happens to be the subject with
 100k rows. `test_a_limited_question_does_not_read_the_whole_memory` covers the
 ordinary case.
 
+## What Phase 5 moved
+
+The last five cases that had an answer in the corpus and no path to it. Not a
+retrieval problem: the habits and the co-presence snapshots were being written
+every night by `distill.py` and **never read back by anything**. Two of the
+system's three memory kinds were write-only, so "how often does that van come
+by?" was answered with a list of sightings, which is a different question.
+
+Three intents now leave the observation log. `how_often` reaches the mined
+habits, `who_with` reaches `scene_snapshots`, `relations` reaches the distilled
+edges — and `group_by` became real rather than a field the runner refused to
+score.
+
+Two things are worth recording beyond "the routes work".
+
+**An aggregate answer is about somebody else.** "Who was with Priya" names Priya
+and answers with the visitor; "does Priya use the forklift" names Priya and
+answers with the forklift. So for those two intents the plan's labels select the
+*anchor*, and the answer is whatever the anchor turned out to be connected to.
+Applying the label filter to both ends would ask which of the people with Priya
+are called Priya, which is nobody. The subject filter is rebuilt from the
+resolved companions once they are known.
+
+That re-aiming is also where this could have widened silently. `_SubjectFilter.ids`
+being `None` means two opposite things — the question named nobody, or it named
+too many people to fit in one statement's bound variables — and in the row path
+the `accepts()` check in the loop resolves the ambiguity. There is no row loop on
+the snapshot path, so the anchor is re-checked against each snapshot's own
+members instead. Without that, a dropped pushdown would turn "who was with
+Priya" into "everyone who was ever with anyone".
+`TestWhoWith::test_the_anchor_holds_even_when_the_pushdown_is_dropped` pins it.
+
+**A recurrence is counted from the rows and corroborated by the habits, not
+either alone.** The counts come from the observations the question actually
+matched, so they are exact and available the moment something is recorded. The
+mined habits lag by a distillation pass, but they are the decaying, corroborated
+claim, and they carry a weight saying how much repetition is behind it. Six
+sightings with no habit means it happened six times; six with a confirmed habit
+means it is what that subject *does*. Counts alone would call any six
+coincidences a pattern; habits alone would answer "how often?" with nothing at
+all until the next nightly run — over exactly the window someone asking is most
+likely to mean.
+
+### Buckets moved to local time (G8)
+
+Habits were bucketed in UTC (`time.gmtime`) and rendered in local time
+(`ask.py`), which is a bug you cannot see until the two disagree: a warehouse in
+Delhi mining `present_around_09h` from footage everyone there remembers as half
+past two. Buckets are now cut on the deployment's clock, by one function
+(`distill.bucket_hour` / `bucket_weekday` / `bucket_day`) with three callers —
+the miner, `digest.py`'s unusual-hour band, and `ask`'s recurrence grouping.
+
+This turned up two tests that were asserting the timezone rather than the
+behaviour: `test_pipeline` checked for the literal `09h` and `test_digest` for
+`unusual_hour:…:03`, both of which were only ever right on a machine in UTC.
+They ask for the bucket now, so they pass on a laptop and in CI for the same
+reason.
+
+`present_around_14h` is unchanged and joined by `present_tue_around_14h`. The
+weekday form is a new string rather than a reshaped one, so `digest.py`, which
+matches the `present_around_` prefix, simply does not see it — deliberate, since
+a Tuesday habit says nothing about whether Wednesday at that hour is unusual.
+The coarse bucket is also not a summary of the fine ones: someone who comes in
+every weekday at 09:00 has one strong hour habit and no weekday habit at all,
+and deriving one from the other would report that as five weak weekly patterns.
+
+### Distillation stopped re-reading history (G9)
+
+`mine_habits` and `mine_relations` take a window, and `run()` measures it back
+from the **newest observation** rather than from `now()` — a camera offline for a
+fortnight would otherwise come back to an empty window and un-reinforce every
+habit it has, presenting an outage as a routine that stopped.
+
+The `for _ in range(n)` write loops are gone. `reinforce_relation` takes
+`times=n`, which is exactly equivalent — the update is additive and the cap is a
+`min`, so n applications land where one scaled by n does — and
+`test_one_weighted_write_equals_n_repeated_ones` asserts that rather than
+assuming it. Measured on the fixture's worst-case edge (one entity, 100,000
+rows at one location): **0.11 s for the single write**, against 227 s for the
+first 2,000 of the 100,000 iterations the loop would have run, since each one
+re-read and rewrote the whole provenance list. About three hours, extrapolated,
+for one edge.
+
+### The eval corpus now runs a distillation pass
+
+`search_corpus.build()` calls `mine_habits` and `mine_relations`. A memory that
+has been running six weeks *has* mined edges — a fixture without them is not a
+smaller deployment, it is one where the scheduler never ran, and Phase 5 would
+have been measured against a system missing a component. The two miners are
+called directly rather than `Distiller.run()`, which ends in
+`prune_old_keyframes()` and deletes files out of the real `FRAMES_DIR`.
+
+This writes only to `relations`. Every case predating Phase 5 reads
+`observations` and none of them can see it, which the unchanged baselines
+confirm. It adds ~3.5 s to a 15.4 s scaled build, and nothing to query time.
+
+### recall@1 recovered, and why
+
+`recall@1` 62.3% → **76.7%**, `recall@5` 73.7% → **85.0%**, MRR 0.697 → **0.850**,
+with the scored set growing 19 → 20. Phase 4's dip was four Phase 5 cases that
+had started running and were returning raw rows in place of an aggregate,
+ranking badly. They now return the right entity first. Over the eleven cases
+scored back at Phase 3 the numbers are still **unchanged at 0.727 across the
+board** — seventeen phases-worth of change later, nothing that worked has moved.
+
+All four remaining failures are `paraphrase_*`, all Phase 6's, all needing
+meaning rather than words: `"loitering"` will never lexically match `"standing
+around, waiting"`. They are also the four remaining silent failures, which is
+now a tidy correspondence — every question this engine cannot answer, it fails
+to answer *invisibly*. That is Phase 7's problem as much as Phase 6's.
+
+### Latency
+
+**The Phase 4 latency row was recorded on a machine running ~6× slow and should
+not be read against this one.** Phase 3's code re-measured in this session gives
+p95 **79.23 ms** against its recorded 66.73, so the machine is back to roughly
+where it was and Phase 4's 460.08 was mostly drift. Both neighbours re-measured
+here, minutes apart, over the 31 cases both versions can run:
+
+| | Phase 4 code (`740188d`) | Phase 5 code |
+|---|---|---|
+| run 1 | p50 0.65 / p95 136.62 | p50 0.61 / p95 81.59 |
+| run 2 | p50 0.60 / p95 **75.57** | p50 0.77 / p95 **78.49** |
+
+Read run 2. The p95 sits on one case at that index and Phase 4's first run
+caught it cold — `negative_nothing_perceived` took 136.6 ms once and 69.8 ms the
+second time, against 68.4 and 68.8 under Phase 5. So: **flat, within noise**,
+which is the expected result. Nothing Phase 5 added is on the path a
+non-aggregate question takes, and the three new routes each read a table small
+by construction — `relations` holds one row per belief, `scene_snapshots` one
+per settled frame.
+
+The two ~950 ms cases are still `entity_type_objects_only` and `limit_last_two`,
+still the fixture's single-100k-row-subject artifact described under Phase 4,
+and still waiting on computing aggregates in SQL rather than in the loop.
+
 ## Baseline detail
 
 Still-failing rows below are stated as of the latest phase row above.
@@ -245,11 +383,11 @@ Still-failing rows below are stated as of the latest phase row above.
 | `exclude_the_courier` | G5 | 4 | ✅ |
 | `limit_last_two` | G5 | 4 | ✅ |
 | `multi_zone_bay_or_aisle` | G5 | 4 | ✅ |
-| `copresence_two_at_gate` | G3 | 5 | ❌ |
-| `copresence_who_with_priya` | G3 | 5 | ❌ |
-| `recurrence_van_how_often` | G3 | 5 | ❌ |
-| `recurrence_van_weekday` | G8 | 5 | ❌ |
-| `relation_priya_uses_forklift` | G3 | 5 | ❌ |
+| `copresence_two_at_gate` | G3 | 5 | ✅ |
+| `copresence_who_with_priya` | G3 | 5 | ✅ |
+| `recurrence_van_how_often` | G3 | 5 | ✅ |
+| `recurrence_van_weekday` | G8 | 5 | ✅ |
+| `relation_priya_uses_forklift` | G3 | 5 | ✅ |
 | `paraphrase_loitering` | G1 | 6 | ❌ |
 | `paraphrase_phone_call` | G1 | 6 | ❌ |
 | `paraphrase_smoking` | G1 | 6 | ❌ |
