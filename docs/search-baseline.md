@@ -8,6 +8,7 @@ never overwrite, so the trajectory stays in version control.
 |---|---|---|---|---|---|---|---|---|
 | **0 — baseline** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | 46.2% | 440.14 | 1150.03 |
 | **1 — keep what was perceived** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | **100.0%** | 470 | 1249 |
+| **2 — lexical index** | **17/32** | **14/32** | **72.7%** | 72.7% | **0.727** | 100.0% | 609 | 1878 |
 
 Latency measured at corpus scale **100000** observations. Reproduce with:
 
@@ -21,6 +22,14 @@ are the median of four. Read a change of tens of milliseconds as noise; the
 p50-over-400ms, p95-over-a-second finding is what matters, and Phase 3 is what
 addresses it. Case counts and retention *are* exact and asserted by CI.
 
+**The Phase 2 latency row is not comparable to the rows above it** — it was
+measured on a different, slower machine, and the numbers are dominated by that
+rather than by the code. The comparison that *is* valid is a paired one taken in
+the same session: Phase 1 code re-measured there gave p50 600 / p95 1853, against
+Phase 2's 609 / 1878. The index costs one extra statement per word question and
+nothing else; the ~600/1900 figures are still the full-table scan in
+`ask.execute()`, untouched until Phase 3.
+
 ## What the baseline row means
 
 - **silent failures** — the question had an answer in the corpus and search
@@ -32,10 +41,11 @@ addresses it. Case counts and retention *are* exact and asserted by CI.
   and now a ratchet: `test_nothing_perceived_is_discarded` fails, naming the
   section, if any report section stops being written.
 - **recall / MRR** — entity-level, over the cases that name expected entities.
-  Today's ordering is by `first_seen`, not relevance, so MRR measures the
-  absence of ranking rather than the quality of it. At this corpus size result
-  lists are short, so recall@1 and recall@20 coincide; they only separate once
-  Phases 2 and 6 start returning ranked candidate sets worth cutting off.
+  Through Phase 1 the ordering was `first_seen`, so MRR measured the absence of
+  ranking rather than its quality. Phase 2 orders word questions by bm25, and
+  window questions still read as a timeline. At this corpus size result lists
+  are short, so recall@1 and recall@20 still coincide; they separate once
+  Phase 6 starts returning candidate sets worth cutting off.
 - **latency** — wall clock for `ask.execute()` alone, excluding both LLM calls.
   Padding rows sit in their own zone and on their own entity, so scaling the
   corpus changes how much the engine sifts without changing any answer.
@@ -50,6 +60,24 @@ was standing nearby. But the four cases that ask for them
 and the harness scores an unsupported plan field as a hard fail rather than let
 an unfiltered result pass for the wrong reason. They flip in **Phase 2**, which
 is where `text` becomes queryable. The data they need is in place as of now.
+
+## What Phase 2 moved
+
+Eight cases flipped, and they are two different stories:
+
+- **Four are Phase 1's, collected late.** `object_gate_open`,
+  `object_forklift_parked`, `area_spill_in_aisle`, `area_pallets_stacked` — the
+  facts were already written; `text` becoming a queryable field is what made them
+  reachable. Retention did not move, because it was already 100%.
+- **Four are Phase 2's own.** `stem_cigarettes`, `stem_parcels`,
+  `stopword_on_the_phone`, `term_order_flickering_light` — matches a substring
+  test cannot make: a plural against a singular, a question containing a word the
+  memory does not, and terms in a different order.
+
+The four `paraphrase_*` cases still fail, and their failure changed character:
+they used to be rejected for using a field the engine ignored, and are now
+genuinely searched and genuinely missed. "Loitering" shares no stem with
+"standing around, waiting" and never will — that needs meaning, which is Phase 6.
 
 ## Baseline detail
 
@@ -66,14 +94,14 @@ Still-failing rows below are stated as of the latest phase row above.
 | `substring_hit_butts` | none | — | ✅ |
 | `substring_hit_waiting` | none | — | ✅ |
 | `zone_scoping_excludes_others` | none | — | ✅ |
-| `area_pallets_stacked` | G2 | 1 | ❌ |
-| `area_spill_in_aisle` | G2 | 1 | ❌ |
-| `object_forklift_parked` | G2 | 1 | ❌ |
-| `object_gate_open` | G2 | 1 | ❌ |
-| `stem_cigarettes` | G1 | 2 | ❌ |
-| `stem_parcels` | G1 | 2 | ❌ |
-| `stopword_on_the_phone` | G1 | 2 | ❌ |
-| `term_order_flickering_light` | G1 | 2 | ❌ |
+| `area_pallets_stacked` | G2 | 1 | ✅ |
+| `area_spill_in_aisle` | G2 | 1 | ✅ |
+| `object_forklift_parked` | G2 | 1 | ✅ |
+| `object_gate_open` | G2 | 1 | ✅ |
+| `stem_cigarettes` | G1 | 2 | ✅ |
+| `stem_parcels` | G1 | 2 | ✅ |
+| `stopword_on_the_phone` | G1 | 2 | ✅ |
+| `term_order_flickering_light` | G1 | 2 | ✅ |
 | `camera_filter_yard` | G5 | 4 | ❌ |
 | `count_sightings_at_bay` | G5 | 4 | ❌ |
 | `entity_type_objects_only` | G5 | 4 | ❌ |

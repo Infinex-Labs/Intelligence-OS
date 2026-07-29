@@ -12,12 +12,14 @@ Schema (one DB, SQLite for the POC -> Postgres/graph at scale):
   scene_snapshots   per-location inventory over time
   relations         distilled, weighted, decaying, auditable edges (relation|habit|event)
   predicate_schema  legal (subject_type, predicate, object_type) triples (grows over time)
+  obs_fts/desc_fts  FTS5 indexes over the `text` columns; derived, rebuildable
 """
 from __future__ import annotations
 
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -256,6 +258,7 @@ class Store:
         self._migrate_m9()
         self._migrate_v4()
         self._migrate_v5_search()
+        self._migrate_v6_fts()
         self.conn.commit()
 
     def close(self) -> None:
@@ -345,6 +348,160 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_obs_desc ON observations(description_id)")
         except sqlite3.OperationalError:
             pass
+
+    # --- full-text index (search plan Phase 2) -------------------------------
+    #
+    # External-content FTS5 over the `text` columns Phase 1 added: the index
+    # holds no copy of the data, only the term postings, and the triggers below
+    # keep it in step with the base table.
+    #
+    # `porter unicode61` is the whole point — "cigarettes" has to find "having a
+    # cigarette", which a substring test never can. What is deliberately NOT
+    # indexed: entity labels and zone names. They are structured fields with
+    # their own filters, and indexing them would let a renamed entity leave a
+    # stale string in the index and let a name rank a row the structured filter
+    # had already excluded.
+    _FTS_SPECS = (
+        ("obs_fts", "observations", "text"),
+        ("desc_fts", "scene_descriptions", "text"),
+    )
+
+    def _migrate_v6_fts(self) -> None:
+        """Build the lexical index, or record that this build cannot.
+
+        FTS5 is compiled into every SQLite we ship on, but "every build we ship
+        on" is not "every build that exists" — a source build with
+        -DSQLITE_OMIT_FTS5 would otherwise turn a search into a crash. When it is
+        missing we set `fts_enabled = False` and callers fall back to the
+        substring matching that has always been there: worse recall, still
+        answers.
+        """
+        self.fts_enabled = False
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
+            self.conn.execute("DROP TABLE _fts_probe")
+        except sqlite3.OperationalError:
+            return
+
+        for fts, base, col in self._FTS_SPECS:
+            existed = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name=?", (fts,)).fetchone()
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5("
+                f"{col}, content='{base}', content_rowid='rowid', "
+                f"tokenize='porter unicode61')")
+            for stmt in (
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ai AFTER INSERT ON {base} BEGIN "
+                f"  INSERT INTO {fts}(rowid, {col}) VALUES (new.rowid, new.{col}); END",
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ad AFTER DELETE ON {base} BEGIN "
+                f"  INSERT INTO {fts}({fts}, rowid, {col}) "
+                f"  VALUES ('delete', old.rowid, old.{col}); END",
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_au AFTER UPDATE ON {base} BEGIN "
+                f"  INSERT INTO {fts}({fts}, rowid, {col}) "
+                f"  VALUES ('delete', old.rowid, old.{col}); "
+                f"  INSERT INTO {fts}(rowid, {col}) VALUES (new.rowid, new.{col}); END",
+            ):
+                self.conn.execute(stmt)
+            if not existed:
+                # First time only. Backfills every row written before the index
+                # existed; on an already-indexed database it would be a full
+                # re-tokenise of the table for no gain.
+                self.conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+        self.fts_enabled = True
+
+    def reindex_text(self) -> None:
+        """Rebuild both indexes from the base tables. Not called on the hot path
+        — it exists for the case where a database was edited behind the triggers'
+        back (a restore, a manual UPDATE with triggers off)."""
+        if not self.fts_enabled:
+            return
+        with self.tx() as c:
+            for fts, _base, _col in self._FTS_SPECS:
+                c.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+
+    # A query is not FTS5 syntax and must never be treated as it: a stray quote
+    # or `*` from a user's question would be a syntax error, and `NOT`/`OR` typed
+    # in English would silently become operators. Terms are extracted and quoted
+    # individually, so the only operator in play is the implicit AND between them.
+    _FTS_STOPWORDS = frozenset({
+        "a", "an", "and", "the", "of", "to", "in", "on", "at", "is", "was",
+        "were", "are", "be", "been", "it", "its", "with", "for", "by", "any",
+        "anyone", "anything", "there", "that", "this",
+    })
+
+    @classmethod
+    def fts_query(cls, text: str) -> Optional[str]:
+        """A user's words as a safe FTS5 MATCH expression, or None if empty.
+
+        Stopwords are dropped rather than required: the corpus stores "on phone"
+        and the question asks "on the phone", so demanding every typed word would
+        fail on the one word carrying no meaning. If a query is *nothing but*
+        stopwords the words are kept — better a narrow match than matching the
+        whole table.
+        """
+        terms = re.findall(r"\w+", (text or "").lower())
+        if not terms:
+            return None
+        kept = [t for t in terms if t not in cls._FTS_STOPWORDS] or terms
+        return " ".join(f'"{t}"' for t in kept)
+
+    def search_text(self, query: str, *, since: Optional[float] = None,
+                    until: Optional[float] = None,
+                    location_ids: Optional[Sequence[str]] = None,
+                    camera_ids: Optional[Sequence[str]] = None,
+                    limit: int = 500) -> list[sqlite3.Row]:
+        """Observations whose `text` matches, best first, filtered in one statement.
+
+        The filters are in the SQL rather than applied after, so a narrow window
+        over a large memory never materialises the rows outside it. `score` is
+        bm25 negated: SQLite returns it smaller-is-better, and a score that grows
+        with relevance is the one every caller expects.
+        """
+        match = self.fts_query(query) if self.fts_enabled else None
+        if match is None:
+            return []
+        q = ["SELECT o.*, -bm25(obs_fts) AS score FROM obs_fts "
+             "JOIN observations o ON o.rowid = obs_fts.rowid "
+             "WHERE obs_fts MATCH ?"]
+        args: list = [match]
+        if since is not None:
+            q.append("AND o.timestamp>=?"); args.append(since)
+        if until is not None:
+            q.append("AND o.timestamp<=?"); args.append(until)
+        if location_ids:
+            q.append(f"AND o.location_id IN ({','.join('?' * len(location_ids))})")
+            args.extend(location_ids)
+        if camera_ids:
+            q.append(f"AND o.camera_id IN ({','.join('?' * len(camera_ids))})")
+            args.extend(camera_ids)
+        q.append("ORDER BY score DESC LIMIT ?"); args.append(limit)
+        try:
+            return self.conn.execute(" ".join(q), args).fetchall()
+        except sqlite3.OperationalError:
+            return []      # malformed MATCH: no answer, never a 500
+
+    def search_descriptions(self, query: str, *, since: Optional[float] = None,
+                            until: Optional[float] = None,
+                            limit: int = 100) -> list[sqlite3.Row]:
+        """The same search over whole VLM reports rather than the rows split out
+        of them — for provenance ("what else did that frame say?")."""
+        match = self.fts_query(query) if self.fts_enabled else None
+        if match is None:
+            return []
+        q = ["SELECT d.*, -bm25(desc_fts) AS score FROM desc_fts "
+             "JOIN scene_descriptions d ON d.rowid = desc_fts.rowid "
+             "WHERE desc_fts MATCH ?"]
+        args: list = [match]
+        if since is not None:
+            q.append("AND d.timestamp>=?"); args.append(since)
+        if until is not None:
+            q.append("AND d.timestamp<=?"); args.append(until)
+        q.append("ORDER BY score DESC LIMIT ?"); args.append(limit)
+        try:
+            return self.conn.execute(" ".join(q), args).fetchall()
+        except sqlite3.OperationalError:
+            return []
 
     # --- alerts (V4-M4) ------------------------------------------------------
     ALERT_STATUSES = ("new", "acknowledged", "resolved")

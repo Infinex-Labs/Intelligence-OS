@@ -349,7 +349,7 @@ noise (~1150 → ~1249 ms); Phase 3 is what addresses latency.
 
 ---
 
-### Phase 2 — The lexical index (zero new dependencies)
+### Phase 2 — The lexical index (zero new dependencies) ✅ DONE
 
 **Why.** G1. SQLite ships FTS5. We are hand-rolling `in` on a string
 (`ask.py:128`) instead of using it. FTS5 gives word variants, phrases,
@@ -396,6 +396,51 @@ compile_options` assertion mirroring the existing thread-safety check in
 
 **Done when.** `search_corpus` proves stem and phrase matches, backfill works on
 a pre-Phase-1 database copy, and Phase 0 recall improves measurably.
+
+**Result.**
+
+| | before | after |
+|---|---|---|
+| cases passing | 9/32 | **17/32** |
+| silent failures | 22/32 | **14/32** |
+| recall@1 / MRR | 62.5% / 0.625 | **72.7% / 0.727** |
+| p50 / p95 @ 100k | 600 / 1853 ms | 609 / 1878 ms (paired, same session) |
+
+Landed as specced — `_migrate_v6_fts()`, both indexes, all six triggers,
+`Store.search_text` / `search_descriptions` — with four decisions worth recording:
+
+- **A user's words are data, never syntax.** `Store.fts_query()` extracts word
+  characters and quotes each term individually, so a question containing `"`,
+  `*`, `:` or the word `OR` is a search, not a syntax error and not an operator.
+  This is the whole safety boundary: everything past it is FTS5 grammar. `search_text`
+  still catches `OperationalError` and returns nothing — a malformed query is an
+  empty answer, never a 500.
+- **Stopwords are dropped from the query, not required of the row.** The memory
+  stores `on phone` and the question is *"on the phone"*; demanding every typed
+  word fails on the one word carrying no meaning. A query that is *nothing but*
+  stopwords keeps them, because dropping them all leaves a match-everything.
+- **`predicate_contains` became a union, not a replacement.** It keeps its
+  substring behaviour — rule rows carry no prose, so the index cannot see
+  `rule_fired` at all — and gains the index on top. A phase that widens recall
+  must never take an existing hit away. The new `text` field is the strict one:
+  match, or you are not a result. Its planner description also had to be
+  inverted: `'smok'` used to be the safe way to reach *"smoking"* and is now the
+  way to miss it, since porter stems `smoking`→`smoke` but `smok`→`smok`.
+- **An unscored hit reports `null`, not `0.0`.** A substring match was never
+  seen by bm25, and calling that a zero would rank it as the worst match rather
+  than the unranked one it is. Scored results sort first, then unscored, then by
+  time; `ranked` in the payload says which ordering was used.
+
+**Two things the numbers do not say.** Four of the eight flipped cases are
+Phase 1's work collected late — the facts were already written and `text` merely
+became reachable. And bm25's magnitude is meaningless at this corpus size: with
+few documents the IDF term collapses and scores land around 1e-6. It orders
+results; it must never gate them, which is why there is no score threshold
+anywhere.
+
+**Not done here, deliberately.** `QUERY_TOOL` still has its five slots — the
+widened query form is Phase 4. Phase 2 reaches production through
+`predicate_contains`, which the planner already emits.
 
 ---
 

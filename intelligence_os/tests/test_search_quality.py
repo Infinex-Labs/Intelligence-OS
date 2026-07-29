@@ -43,7 +43,7 @@ CASES_PATH = Path(__file__).parent / "fixtures" / "search_cases.yaml"
 # of what the engine could do when.
 SUPPORTED_PLAN_FIELDS = {
     "start", "end", "zone", "entity_label", "predicate_contains",  # today (ask.py:24-45)
-    # Phase 2 adds:  text
+    "text",                                          # Phase 2 (FTS5, ask.py:112)
     # Phase 4 adds:  intent, zones, cameras, entity_labels, entity_type,
     #                exclude_entity_labels, exclude_predicates, order, limit,
     #                min_confidence, group_by

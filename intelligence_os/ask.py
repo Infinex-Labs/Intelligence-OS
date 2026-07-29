@@ -36,9 +36,15 @@ QUERY_TOOL = {
             "entity_label": {"type": ["string", "null"],
                              "description": "one of the known entity labels if the question "
                              "names one, else null"},
+            # Phase 2 put a stemming index behind this field, which inverts the
+            # old advice: 'smok' used to be the safe way to reach "smoking", and
+            # now it is the way to miss it — porter stems 'smoking' to 'smoke'
+            # and 'smok' to itself. Whole words, as the user said them.
             "predicate_contains": {"type": ["string", "null"],
-                                   "description": "substring filter on observation predicates "
-                                   "(e.g. 'smok', 'rule_fired'), else null"},
+                                   "description": "the words to search for, as whole words "
+                                   "(e.g. 'smoking', 'cigarettes', 'gate open', "
+                                   "'rule_fired'); do not truncate them. null if the "
+                                   "question names no particular thing to look for"},
         },
         "required": ["start", "end", "zone", "entity_label", "predicate_contains"],
     },
@@ -109,6 +115,7 @@ def execute(store: Store, query: dict) -> dict:
     zone_name = query.get("zone")
     label_q = (query.get("entity_label") or "").strip().lower()
     pred_q = (query.get("predicate_contains") or "").strip().lower()
+    text_q = (query.get("text") or "").strip().lower()
 
     loc_names = {r["location_id"]: r["name"] for r in store.locations()}
     loc_id = None
@@ -118,6 +125,20 @@ def execute(store: Store, query: dict) -> dict:
                 loc_id = lid
                 break
 
+    # Phase 2: the words go to the lexical index, which stems and ranks. The two
+    # word fields differ in how strict they are, and deliberately so:
+    #   `text`               — the search surface. Match or you are not a result.
+    #   `predicate_contains` — the older field, still the machine contract that
+    #                          'rule_fired' is matched on. It keeps its substring
+    #                          behaviour AND gains the index, as a union: a phase
+    #                          that widens recall must never take a hit away.
+    # Both go through the same MATCH so ranking is comparable across them.
+    scores: dict[str, float] = {}
+    if text_q or pred_q:
+        for r in store.search_text(text_q or pred_q, since=start, until=end,
+                                   location_ids=[loc_id] if loc_id else None):
+            scores[r["observation_id"]] = r["score"]
+
     rows = store.observations(since=start)
     per_entity: dict[str, dict] = {}
     total = 0
@@ -126,7 +147,10 @@ def execute(store: Store, query: dict) -> dict:
             continue
         if loc_id is not None and o["location_id"] != loc_id:
             continue
-        if pred_q and pred_q not in o["predicate"].lower():
+        hit = scores.get(o["observation_id"])
+        if text_q and hit is None:
+            continue
+        if pred_q and hit is None and pred_q not in o["predicate"].lower():
             continue
         eid = o["subject_entity_id"]
         ent = per_entity.get(eid)
@@ -150,11 +174,20 @@ def execute(store: Store, query: dict) -> dict:
                 "entity_id": eid, "label": label, "type": etype,
                 "first_seen": o["timestamp"], "last_seen": o["timestamp"],
                 "n_observations": 0, "states": [], "rule_events": [], "keyframes": [],
+                # None, not 0.0: a row found by substring was never scored, and
+                # calling that a zero would rank it as the worst match instead of
+                # the unranked one it is.
+                "match_score": None,
             }
         elif label_q and label_q not in ent["label"].lower():
             continue
         total += 1
         ent["n_observations"] += 1
+        if hit is not None:
+            # An entity is as relevant as its best-matching row. Summing would
+            # rank whoever was on camera longest, which is presence, not answer.
+            prev = ent["match_score"]
+            ent["match_score"] = hit if prev is None else max(prev, hit)
         ent["first_seen"] = min(ent["first_seen"], o["timestamp"])
         ent["last_seen"] = max(ent["last_seen"], o["timestamp"])
         pred = o["predicate"]
@@ -170,12 +203,26 @@ def execute(store: Store, query: dict) -> dict:
             if url not in ent["keyframes"]:
                 ent["keyframes"].append(url)
 
-    entities = sorted(per_entity.values(), key=lambda e: e["first_seen"])
+    # A word question asks "who best fits these words", so it comes back ranked;
+    # anything else is a window over a period, and reads as a timeline.
+    if text_q or pred_q:
+        # Scored first, then the unscored substring hits, then by time. bm25 is
+        # relative, not absolute — its magnitude says nothing on its own, which
+        # is why it orders results and never gates them.
+        entities = sorted(per_entity.values(),
+                          key=lambda e: (e["match_score"] is None,
+                                         -(e["match_score"] or 0.0),
+                                         e["first_seen"]))
+    else:
+        entities = sorted(per_entity.values(), key=lambda e: e["first_seen"])
     for e in entities:
         e["duration_s"] = round(e["last_seen"] - e["first_seen"], 1)
         e["keyframes"] = e["keyframes"][:4]
         e["states"] = e["states"][:8]
-    return {"query": query, "total_observations": total, "entities": entities}
+        if e["match_score"] is not None:
+            e["match_score"] = float(f"{e['match_score']:.6g}")
+    return {"query": query, "total_observations": total, "entities": entities,
+            "ranked": bool(text_q or pred_q)}
 
 
 def _kf(source_ref: Optional[str]) -> Optional[str]:

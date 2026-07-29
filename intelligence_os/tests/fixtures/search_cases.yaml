@@ -85,7 +85,7 @@
   question: "anyone with cigarettes?"
   gap: G1
   fixed_by: 2
-  baseline: fail          # "cigarettes" != "cigarette"; no stemmer
+  baseline: pass          # Phase 2: porter stems "cigarettes" -> "cigarett"
   plan: {start: null, end: null, zone: null, predicate_contains: "cigarettes"}
   expect_entities: [dave]
 
@@ -93,7 +93,7 @@
   question: "was anyone on the phone?"
   gap: G1
   fixed_by: 2
-  baseline: fail          # stored "on phone"; the word "the" breaks the substring
+  baseline: pass          # Phase 2: "the" is dropped, not required
   plan: {start: null, end: null, zone: null, predicate_contains: "on the phone"}
   expect_entities: [priya]
 
@@ -101,7 +101,7 @@
   question: "was a light flickering anywhere?"
   gap: G1
   fixed_by: 2
-  baseline: fail          # stored "aisle light flickering"; word order differs
+  baseline: pass          # Phase 2: FTS terms are AND-ed, order-free
   plan: {start: null, end: null, zone: null, predicate_contains: "flickering light"}
   expect_text: "flickering"
 
@@ -109,7 +109,7 @@
   question: "anyone carrying parcels?"
   gap: G1
   fixed_by: 2
-  baseline: fail          # stored "a parcel"
+  baseline: pass          # Phase 2: "parcels" and "parcel" share a stem
   plan: {start: null, end: null, zone: null, predicate_contains: "parcels"}
   expect_entities: [courier]
 
@@ -156,7 +156,7 @@
   question: "was the gate left open?"
   gap: G2
   fixed_by: 1
-  baseline: fail          # report said "gate — open, unlatched"; never written
+  baseline: pass          # Phase 1 wrote it; Phase 2 made it reachable
   plan: {start: null, end: null, zone: null, text: "gate open"}
   expect_text: "gate"
 
@@ -164,7 +164,7 @@
   question: "where was the forklift parked?"
   gap: G2
   fixed_by: 1
-  baseline: fail          # objects[] dropped by SceneDescription.states()
+  baseline: pass          # Phase 1 wrote it; Phase 2 made it reachable
   plan: {start: null, end: null, zone: null, text: "forklift"}
   expect_text: "forklift"
 
@@ -172,7 +172,7 @@
   question: "was there a spill in aisle 3?"
   gap: G2
   fixed_by: 1
-  baseline: fail          # locations[].contents dropped
+  baseline: pass          # Phase 1 wrote it; Phase 2 made it reachable
   plan: {start: null, end: null, zone: aisle_3, text: "spill"}
   expect_text: "spill"
 
@@ -180,7 +180,7 @@
   question: "were the pallets still stacked at the bay?"
   gap: G2
   fixed_by: 1
-  baseline: fail
+  baseline: pass          # Phase 1 wrote it; Phase 2 made it reachable
   plan: {start: null, end: null, zone: loading_bay, text: "pallet stack"}
   expect_text: "pallet"
 
