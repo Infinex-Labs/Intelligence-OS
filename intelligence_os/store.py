@@ -216,8 +216,13 @@ CREATE TABLE IF NOT EXISTS scene_descriptions (
     text           TEXT NOT NULL    -- flattened prose
 );
 
-CREATE INDEX IF NOT EXISTS idx_obs_subject ON observations(subject_entity_id);
-CREATE INDEX IF NOT EXISTS idx_obs_time    ON observations(timestamp);
+-- Search plan Phase 3: the two shapes every question has. A question is a time
+-- window, optionally narrowed to a place; a profile is one subject over time.
+-- Both composites lead with the column the older single-column indexes covered
+-- (`_migrate_v7_pushdown` drops those as redundant), so nothing that used them
+-- loses its index — the second column just saves the row lookup.
+CREATE INDEX IF NOT EXISTS idx_obs_time_loc  ON observations(timestamp, location_id);
+CREATE INDEX IF NOT EXISTS idx_obs_subj_time ON observations(subject_entity_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_desc_time   ON scene_descriptions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sig_entity  ON signatures(entity_id);
 CREATE INDEX IF NOT EXISTS idx_snap_loc    ON scene_snapshots(location_id, timestamp);
@@ -259,6 +264,7 @@ class Store:
         self._migrate_v4()
         self._migrate_v5_search()
         self._migrate_v6_fts()
+        self._migrate_v7_pushdown()
         self.conn.commit()
 
     def close(self) -> None:
@@ -348,6 +354,21 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_obs_desc ON observations(description_id)")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_v7_pushdown(self) -> None:
+        """Retire the two single-column observation indexes the composites cover.
+
+        `idx_obs_time` and `idx_obs_subject` are exact leading-column prefixes of
+        `idx_obs_time_loc` and `idx_obs_subj_time`, so every query they served is
+        still indexed. Keeping them would cost two extra B-tree writes on every
+        observation insert — and the write path runs per frame, per camera, all
+        day, which is the one place in this system where that is not free.
+        """
+        for name in ("idx_obs_time", "idx_obs_subject"):
+            try:
+                self.conn.execute(f"DROP INDEX IF EXISTS {name}")
+            except sqlite3.OperationalError:
+                pass
 
     # --- full-text index (search plan Phase 2) -------------------------------
     #
@@ -757,6 +778,25 @@ class Store:
             "SELECT * FROM entities WHERE entity_id=?", (entity_id,)
         ).fetchone()
 
+    def get_entities(self, entity_ids: Sequence[str]) -> dict[str, sqlite3.Row]:
+        """The entities behind a set of ids, keyed by id, missing ids absent.
+
+        The point is the N+1 it replaces: aggregating a day of footage used to
+        issue one `get_entity` per observation row, most of them for the same
+        handful of people. Chunked at 900 because the id set here is unbounded —
+        one per row in the worst case — and older SQLite builds cap a statement
+        at 999 bound variables.
+        """
+        ids = list(dict.fromkeys(entity_ids))
+        out: dict[str, sqlite3.Row] = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            for row in self.conn.execute(
+                "SELECT * FROM entities WHERE entity_id IN "
+                f"({','.join('?' * len(chunk))})", chunk):
+                out[row["entity_id"]] = row
+        return out
+
     def list_entities(self, type_: Optional[str] = None, active_only: bool = True
                       ) -> list[sqlite3.Row]:
         q = "SELECT * FROM entities"
@@ -872,13 +912,53 @@ class Store:
             )
         return oid
 
-    def observations(self, subject_entity_id: Optional[str] = None,
-                     since: Optional[float] = None,
-                     camera_id: Optional[str] = None,
-                     user_id: Optional[str] = None,
-                     until: Optional[float] = None) -> list[sqlite3.Row]:
-        q = "SELECT * FROM observations"
-        conds, args = [], []
+    # --- observation queries (search plan Phase 3) ---------------------------
+    #
+    # Every filter below composes into one WHERE clause, because the alternative
+    # — the one this replaced — was to load the table into Python and drop rows
+    # in a loop. That is survivable for a week of footage and not for a year.
+    #
+    # Two conventions, stated once here rather than repeated per argument:
+    #
+    #   * `None` means "no filter". An EMPTY sequence means "a filter with no
+    #     permitted values", and matches nothing. They are different questions
+    #     and must not collapse into one: "in any of these zones", asked of an
+    #     empty list of zones, has no answer — it does not mean "anywhere".
+    #     `exclude_predicates` is the one inverted filter, so an empty exclusion
+    #     excludes nothing, which is the same rule read from the other side.
+    #   * Values are always bound. Only the *number* of placeholders is ever
+    #     interpolated into the SQL text — never a value, never a column name.
+    _ORDERS = {"asc": "ASC", "desc": "DESC"}
+
+    @staticmethod
+    def _like_literal(text: str) -> str:
+        """A user's substring as a LIKE pattern matching it literally.
+
+        Without the escaping, a question containing `%` would match every row:
+        the search would silently *widen* at the exact moment it was asked to
+        narrow. Paired with `ESCAPE '\\'` at every use site.
+        """
+        for ch in ("\\", "%", "_"):
+            text = text.replace(ch, "\\" + ch)
+        return f"%{text}%"
+
+    def _obs_where(self, *, subject_entity_id=None, since=None, until=None,
+                   camera_id=None, user_id=None, location_ids=None,
+                   entity_ids=None, observation_ids=None,
+                   predicate_contains=None, predicate_prefixes=None,
+                   exclude_predicates=None, origins=None, min_confidence=None,
+                   match_any: bool = False) -> tuple[str, list]:
+        """The shared WHERE clause. Returns (sql_fragment, bound_args)."""
+        conds: list[str] = []
+        args: list = []
+
+        def any_of(col: str, values) -> str:
+            vals = list(values)
+            if not vals:
+                return "0"                  # no permitted values -> no rows
+            args.extend(vals)
+            return f"{col} IN ({','.join('?' * len(vals))})"
+
         if subject_entity_id:
             conds.append("subject_entity_id=?"); args.append(subject_entity_id)
         if since is not None:
@@ -889,10 +969,125 @@ class Store:
             conds.append("camera_id=?"); args.append(camera_id)
         if user_id is not None:
             conds.append("user_id=?"); args.append(user_id)
-        if conds:
-            q += " WHERE " + " AND ".join(conds)
-        q += " ORDER BY timestamp"
+        if location_ids is not None:
+            conds.append(any_of("location_id", location_ids))
+        if entity_ids is not None:
+            conds.append(any_of("subject_entity_id", entity_ids))
+        if origins is not None:
+            conds.append(any_of("origin", origins))
+        if min_confidence is not None:
+            conds.append("confidence>=?"); args.append(min_confidence)
+        if predicate_prefixes is not None:
+            prefixes = list(predicate_prefixes)
+            if not prefixes:
+                conds.append("0")
+            else:
+                conds.append("(" + " OR ".join(
+                    "predicate LIKE ? ESCAPE '\\'" for _ in prefixes) + ")")
+                # _like_literal wraps both ends; a prefix match wants only the
+                # trailing wildcard, so the leading one is dropped.
+                args.extend(self._like_literal(p)[1:] for p in prefixes)
+        if exclude_predicates:
+            excl = list(exclude_predicates)
+            conds.append(f"predicate NOT IN ({','.join('?' * len(excl))})")
+            args.extend(excl)
+
+        # The two ways a word question reaches rows: the substring the machine
+        # contract is matched on ('rule_fired:' carries no prose), and the ids
+        # the lexical index ranked. `match_any` ORs them — Phase 2's union rule,
+        # now expressed in SQL instead of two passes in Python. Everything above
+        # still ANDs, so widening recall can never cross a hard filter.
+        word: list[str] = []
+        if predicate_contains is not None:
+            word.append("LOWER(predicate) LIKE ? ESCAPE '\\'")
+            args.append(self._like_literal(predicate_contains.lower()))
+        if observation_ids is not None:
+            word.append(any_of("observation_id", observation_ids))
+        if word:
+            conds.append("(" + (" OR " if match_any else " AND ").join(word) + ")")
+
+        return (" WHERE " + " AND ".join(conds)) if conds else "", args
+
+    def observations(self, subject_entity_id: Optional[str] = None,
+                     since: Optional[float] = None,
+                     camera_id: Optional[str] = None,
+                     user_id: Optional[str] = None,
+                     until: Optional[float] = None,
+                     *,
+                     location_ids: Optional[Sequence[str]] = None,
+                     entity_ids: Optional[Sequence[str]] = None,
+                     observation_ids: Optional[Sequence[str]] = None,
+                     predicate_contains: Optional[str] = None,
+                     predicate_prefixes: Optional[Sequence[str]] = None,
+                     exclude_predicates: Optional[Sequence[str]] = None,
+                     origins: Optional[Sequence[str]] = None,
+                     min_confidence: Optional[float] = None,
+                     match_any: bool = False,
+                     order: str = "asc",
+                     limit: Optional[int] = None) -> list[sqlite3.Row]:
+        """Observation rows matching every filter given, in timestamp order.
+
+        `entity_ids` and `observation_ids` are bound one placeholder per id, so
+        they are for sets of tens or hundreds — a ranked shortlist, not a way to
+        pass the whole table back in.
+        """
+        try:
+            direction = self._ORDERS[order]
+        except KeyError:
+            raise ValueError(
+                f"order must be one of {sorted(self._ORDERS)}, not {order!r}") from None
+        where, args = self._obs_where(
+            subject_entity_id=subject_entity_id, since=since, until=until,
+            camera_id=camera_id, user_id=user_id, location_ids=location_ids,
+            entity_ids=entity_ids, observation_ids=observation_ids,
+            predicate_contains=predicate_contains,
+            predicate_prefixes=predicate_prefixes,
+            exclude_predicates=exclude_predicates, origins=origins,
+            min_confidence=min_confidence, match_any=match_any)
+        # `rowid` makes the order total. Without it, rows sharing a timestamp —
+        # which every multi-fact VLM report produces, since one frame writes
+        # several rows at one instant — come back in whatever order the chosen
+        # index happened to yield, so adding a filter could silently reshuffle
+        # the states listed under an entity. Ties now break by insertion order:
+        # the order the report was written in, which is the order it was read in.
+        q = (f"SELECT * FROM observations{where} "
+             f"ORDER BY timestamp {direction}, rowid {direction}")
+        if limit is not None:
+            q += " LIMIT ?"; args.append(limit)
         return self.conn.execute(q, args).fetchall()
+
+    def count_observations(self, subject_entity_id: Optional[str] = None,
+                           since: Optional[float] = None,
+                           camera_id: Optional[str] = None,
+                           user_id: Optional[str] = None,
+                           until: Optional[float] = None,
+                           **filters) -> int:
+        """How many rows match — counted by SQLite, not by len() over the rows.
+
+        Same filters as `observations()`. The difference matters: the call sites
+        this replaced built a full list of row objects and then threw all of them
+        away except the length.
+        """
+        where, args = self._obs_where(
+            subject_entity_id=subject_entity_id, since=since, until=until,
+            camera_id=camera_id, user_id=user_id, **filters)
+        return self.conn.execute(
+            f"SELECT COUNT(*) c FROM observations{where}", args).fetchone()["c"]
+
+    def scene_subjects(self) -> list[str]:
+        """Every place-owned subject that actually appears in the memory.
+
+        `scene:<id>` subjects are synthetic — `scene_subject()` builds them from
+        a zone, a camera, or nothing at all, and none of them have an entities
+        row — so the only authority on which exist is the observations. Written
+        as a range rather than `LIKE 'scene:%'` because a range is what SQLite
+        can answer from idx_obs_subj_time without reading the rows.
+        """
+        hi = SCENE_PREFIX[:-1] + chr(ord(SCENE_PREFIX[-1]) + 1)
+        return [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT subject_entity_id FROM observations "
+            "WHERE subject_entity_id >= ? AND subject_entity_id < ?",
+            (SCENE_PREFIX, hi))]
 
     def get_observation(self, observation_id: str) -> Optional[sqlite3.Row]:
         return self.conn.execute(
@@ -1215,7 +1410,7 @@ class Store:
                 continue
             # prefer a labeled entity as the survivor, else the most-observed one
             def rank(e):
-                return (keep_labeled and e in labeled, len(self.observations(e)))
+                return (keep_labeled and e in labeled, self.count_observations(e))
             target = max(members, key=rank)
             for m in members:
                 if m != target:

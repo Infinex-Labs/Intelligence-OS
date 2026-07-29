@@ -9,6 +9,7 @@ never overwrite, so the trajectory stays in version control.
 | **0 — baseline** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | 46.2% | 440.14 | 1150.03 |
 | **1 — keep what was perceived** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | **100.0%** | 470 | 1249 |
 | **2 — lexical index** | **17/32** | **14/32** | **72.7%** | 72.7% | **0.727** | 100.0% | 609 | 1878 |
+| **3 — filtering in the database** | 17/32 | 14/32 | 72.7% | 72.7% | 0.727 | 100.0% | **0.49** | **66.73** |
 
 Latency measured at corpus scale **100000** observations. Reproduce with:
 
@@ -18,17 +19,26 @@ python scripts/search_eval.py --scale 100000 --write-baseline
 
 Latency is wall clock and **not** reproducible to the digit: repeated runs of the
 Phase 1 row spanned p50 449–515 ms and p95 1198–1344 ms, so the recorded figures
-are the median of four. Read a change of tens of milliseconds as noise; the
-p50-over-400ms, p95-over-a-second finding is what matters, and Phase 3 is what
-addresses it. Case counts and retention *are* exact and asserted by CI.
+are the median of four. Read a change of tens of milliseconds as noise through
+Phase 2; from Phase 3 the numbers are small enough that a few milliseconds is a
+real proportion, so read the ranges quoted below rather than the point estimate.
+Case counts and retention *are* exact and asserted by CI.
 
-**The Phase 2 latency row is not comparable to the rows above it** — it was
-measured on a different, slower machine, and the numbers are dominated by that
-rather than by the code. The comparison that *is* valid is a paired one taken in
-the same session: Phase 1 code re-measured there gave p50 600 / p95 1853, against
-Phase 2's 609 / 1878. The index costs one extra statement per word question and
-nothing else; the ~600/1900 figures are still the full-table scan in
-`ask.execute()`, untouched until Phase 3.
+**The Phase 2 and 3 latency rows are not comparable to the rows above them** —
+they were measured on a different, slower machine, and those numbers were
+dominated by that rather than by the code. The comparison that *is* valid is a
+paired one taken in the same session: Phase 1 code re-measured there gave p50 600
+/ p95 1853, against Phase 2's 609 / 1878. The index costs one extra statement per
+word question and nothing else; the ~600/1900 figures were still the full-table
+scan in `ask.execute()`.
+
+**Phase 3 is measured on that same machine, so 609/1878 → 0.49/66.73 is a like
+for like comparison**: roughly 1200× at the median and 28× at the tail. Median of
+four runs; the spread was p50 0.44–1.26 ms (the high one is the first, cold run)
+and p95 62.5–73.6 ms. The shape of the change matters more than the multiple —
+latency stopped being a function of *how much footage exists* and became a
+function of *how much of it the question actually asks about*, which is the
+property that has to hold as a memory ages.
 
 ## What the baseline row means
 
@@ -78,6 +88,38 @@ The four `paraphrase_*` cases still fail, and their failure changed character:
 they used to be rejected for using a field the engine ignored, and are now
 genuinely searched and genuinely missed. "Loitering" shares no stem with
 "standing around, waiting" and never will — that needs meaning, which is Phase 6.
+
+## What Phase 3 moved
+
+**Nothing, in the columns above — and that is the pass criterion.** Phase 3 is a
+pure refactor of the aggregation core, so every case that passed still passes,
+every case that failed still fails for the same recorded reason, and the answers
+are byte-identical: all 32 case results were diffed before and after, field by
+field, including the order of the states listed under each entity.
+
+The latency columns are the whole change. Where it went, per case at 100k rows:
+
+| question shape | before | after | why |
+|---|---|---|---|
+| names a person (`label_filter_priya`) | 562 ms | <1 ms | the name resolves to ids, and SQLite reads only those rows |
+| names nobody who exists (`negative_no_such_person`) | 541 ms | <1 ms | an empty id set is answered without reading a row |
+| a word question (`stem_cigarettes`) | ~55 ms | ~70 ms | unchanged in kind: the `LIKE` half of the union still scans |
+
+The remaining tail is that last row, and it is the honest cost of
+`predicate_contains` keeping its substring behaviour: `LIKE '%…%'` cannot use an
+index, so it reads the predicate of every row. It is not worth an index of its
+own, because **Phase 4 retires the field** — `text` goes to the lexical index and
+rule matching becomes a `predicate_prefixes` lookup, which *is* indexed.
+
+Two costs were accepted deliberately rather than optimised away:
+
+- **The label filter is checked twice** — once as an id set in SQL, once on the
+  displayed name in the loop. The name a subject is answered under is derived,
+  not a column (an unlabeled person is `Person 4f2a91`; an unowned fact is the
+  zone's name), so SQL can only narrow. The loop stays the definition.
+- **A name matching more than 900 subjects is not pushed down at all**, because
+  it would not fit in one statement's bound variables. It falls back to filtering
+  in the loop. A name that matches 900 subjects was not narrowing anything.
 
 ## Baseline detail
 

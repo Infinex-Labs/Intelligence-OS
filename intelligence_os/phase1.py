@@ -148,7 +148,7 @@ def entities(args) -> None:
         return
     for e in rows:
         nsig = len(store.entity_signatures(e["entity_id"], "face"))
-        nobs = len(store.observations(e["entity_id"]))
+        nobs = store.count_observations(e["entity_id"])
         print(f"{e['entity_id']}  type={e['type']:6s} "
               f"label={e['label'] or '-':12s} status={e['status']:14s} "
               f"sigs={nsig} obs={nobs}")

@@ -1,6 +1,7 @@
 # Search & Retrieval Architecture Plan
 
-**Status:** proposal, not yet implemented
+**Status:** Phases 0–3 landed; 4–8 still proposal. See
+[`search-baseline.md`](search-baseline.md) for the scored trajectory.
 **Scope:** the query/retrieval layers of Intelligence OS — `ask.py`, the search
 surface of `store.py`, the memory-write path in `run.py`/`vlm.py`, and the
 recurrence tables in `distill.py`.
@@ -444,7 +445,7 @@ widened query form is Phase 4. Phase 2 reaches production through
 
 ---
 
-### Phase 3 — Push filtering into the database
+### Phase 3 — Push filtering into the database ✅ DONE
 
 **Why.** G6. Every question loads the table into Python. The indexes to avoid
 this already exist (`store.py:186-192`); `execute()` just does not use them.
@@ -474,6 +475,67 @@ currently-passing case. Land as pure refactor, behaviour frozen.
 
 **Done when.** p95 on a 100k-row DB is sub-second, and all pre-existing tests
 pass unchanged.
+
+**Result.**
+
+| | before | after |
+|---|---|---|
+| p50 @ 100k | 609 ms | **0.49 ms** |
+| p95 @ 100k | 1878 ms | **66.73 ms** |
+| cases passing | 17/32 | 17/32 — unchanged, deliberately |
+| tests | 161 | 202 |
+
+Landed as specced, plus one thing the spec did not anticipate. Four decisions
+worth recording:
+
+- **The output was frozen by diffing it, not by hoping.** All 32 case results
+  were dumped before the change and after it and compared field by field. The
+  first diff was real and would never have been caught by the pass/fail score:
+  two states listed under one entity had swapped places. Rows sharing a
+  timestamp — which *every* multi-fact frame produces, since one report writes
+  several rows at one instant — were being ordered by whatever index the plan
+  happened to pick, so adding a filter reshuffled equal rows. `ORDER BY
+  timestamp, rowid` makes the order total: ties break by insertion order, which
+  is the order the report was written in. That bug predates this phase; pushing
+  filters down is what made it observable.
+- **`None` is not an empty list.** Every sequence filter reads `None` as "no
+  filter" and `[]` as "a filter with no permitted values, matching nothing".
+  Collapsing them would mean that asking about an empty set of zones returns the
+  entire table — a search that silently widens at the moment it was asked to
+  narrow. `exclude_predicates` is the one inverted filter, so an empty exclusion
+  excludes nothing; same rule read from the other side.
+- **A name is not a column.** The label filter was the last full scan (562 ms of
+  the 1878), but it filters on the *displayed* name, which is derived: an
+  unlabeled entity shows as `Person 4f2a91`, and a fact nobody owns shows as the
+  zone it happened in — and a `scene:` subject may be keyed by a camera, or by
+  nothing, when there is no zone. So `_label_for()` is now the single definition
+  of that name, used both to resolve a name to an id set for SQL and to display
+  it in the loop. Two definitions would mean filtering on one meaning and
+  showing another. SQL narrows; the loop still decides.
+- **Counting stayed in Python, contrary to item 5.** `total_observations` counts
+  rows that survived *entity resolution* — a row whose subject no longer exists
+  is not an answer — and SQL cannot see that. `Store.count_observations()` was
+  added and used where a count is genuinely all that is wanted (`run.py`,
+  `operator.py`, `phase1.py`, and the merge ranking in `store.py`, all of which
+  built a full list of row objects and kept only its length).
+
+**The N+1 was worse than "one query per row" suggests.** It was one
+`get_entity()` per row *including rejected ones*, which were never cached, so
+asking about Priya paid a query for every row belonging to everyone else. The
+cost of a question scaled with how long other people stood in front of the
+camera. It is now one batched `get_entities()` for the whole result.
+
+**Not done here, deliberately.** The `LIKE '%…%'` half of the word union still
+scans (~70 ms at 100k) and did not get an index, because Phase 4 retires
+`predicate_contains` and rule matching becomes an indexed prefix lookup. The new
+`predicate_prefixes`, `exclude_predicates`, `origins`, `min_confidence`, `order`
+and `limit` filters are built and tested but not yet reachable from a question —
+that is Phase 4's job, and this is the layer it needs underneath it.
+
+**Still scanning elsewhere.** `distill.py:147,194` and `rules.py:228` iterate
+`store.observations()` and filter in Python, exactly as `execute()` used to.
+They are on the write path rather than the query path, so they were out of scope
+here, but they are where the same treatment pays next.
 
 ---
 

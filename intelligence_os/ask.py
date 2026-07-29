@@ -108,6 +108,49 @@ def plan_query(question: str, store: Store, now: Optional[float] = None,
     raise RuntimeError("Could not parse the question into a query.")
 
 
+MAX_PUSHED_IDS = 900        # SQLite's older bound-variable cap, less headroom
+
+
+def _label_for(eid: str, row, loc_names: dict) -> Optional[str]:
+    """The name a subject is answered under. Not a column — derived.
+
+    An entity with no label is shown by its type and a short id; a fact nobody
+    owns — an open gate, a spill — is recorded against the place
+    (`store.scene_subject`) and shown as the zone's name. `None` means the
+    subject cannot be named, and a subject that cannot be named cannot be an
+    answer.
+
+    There is one definition here because there are two callers: the loop below,
+    and the id set handed to SQL when the question names someone. If those two
+    ever disagreed, a question would filter on one meaning of "label" and
+    display another.
+    """
+    if row is not None:
+        return row["label"] or f"{row['type'].capitalize()} {eid[-6:]}"
+    if eid.startswith(SCENE_PREFIX):
+        place = eid[len(SCENE_PREFIX):]
+        return loc_names.get(place, place)
+    return None
+
+
+def _subjects_labelled(store: Store, label_q: str, loc_names: dict) -> Optional[list[str]]:
+    """Subject ids whose display label contains `label_q`, for the SQL filter.
+
+    One pass over the entity table, which is bounded by how many things have
+    ever been seen rather than by how often they were seen — the distinction
+    that makes this affordable and made the per-row version not.
+
+    `None` means "too many to push down": above the bound-variable cap the ids
+    go back to being filtered in the loop. A label matching that many subjects
+    was not narrowing anything anyway, so the fallback gives up nothing.
+    """
+    ids = [e["entity_id"] for e in store.list_entities(active_only=False)
+           if label_q in (_label_for(e["entity_id"], e, loc_names) or "").lower()]
+    ids += [sid for sid in store.scene_subjects()
+            if label_q in (_label_for(sid, None, loc_names) or "").lower()]
+    return None if len(ids) > MAX_PUSHED_IDS else ids
+
+
 def execute(store: Store, query: dict) -> dict:
     """Deterministic aggregation over observation rows. Every claim in the output
     is a row (or an aggregate of rows) the caller can inspect."""
@@ -133,42 +176,55 @@ def execute(store: Store, query: dict) -> dict:
     #                          behaviour AND gains the index, as a union: a phase
     #                          that widens recall must never take a hit away.
     # Both go through the same MATCH so ranking is comparable across them.
+    loc_ids = [loc_id] if loc_id else None
     scores: dict[str, float] = {}
     if text_q or pred_q:
         for r in store.search_text(text_q or pred_q, since=start, until=end,
-                                   location_ids=[loc_id] if loc_id else None):
+                                   location_ids=loc_ids):
             scores[r["observation_id"]] = r["score"]
 
-    rows = store.observations(since=start)
+    # Phase 3: the window, the zone and the words are all decided by SQLite now.
+    # This used to read the whole table and drop rows in a Python loop, which
+    # meant a question about one hour of one camera paid for every hour of every
+    # camera ever recorded. The union that Phase 2 expressed as two conditions in
+    # the loop is the same union, handed to `match_any` — the ranked ids OR the
+    # substring, and never wider than the hard filters above.
+    ent_ids = _subjects_labelled(store, label_q, loc_names) if label_q else None
+    if text_q or pred_q:
+        rows = store.observations(
+            since=start, until=end, location_ids=loc_ids, entity_ids=ent_ids,
+            observation_ids=list(scores),
+            predicate_contains=pred_q if pred_q and not text_q else None,
+            match_any=True)
+    else:
+        rows = store.observations(since=start, until=end, location_ids=loc_ids,
+                                  entity_ids=ent_ids)
+
+    # One statement for every entity these rows are about, instead of one per
+    # row. A busy hour is thousands of rows about a dozen people.
+    ents = store.get_entities({o["subject_entity_id"] for o in rows})
+
     per_entity: dict[str, dict] = {}
+    rejected: set[str] = set()      # ids already judged: unresolvable, or wrong label
     total = 0
     for o in rows:
-        if end is not None and o["timestamp"] > end:
-            continue
-        if loc_id is not None and o["location_id"] != loc_id:
-            continue
         hit = scores.get(o["observation_id"])
-        if text_q and hit is None:
-            continue
-        if pred_q and hit is None and pred_q not in o["predicate"].lower():
-            continue
         eid = o["subject_entity_id"]
         ent = per_entity.get(eid)
         if ent is None:
-            row = store.get_entity(eid)
-            if row is not None:
-                etype = row["type"]
-                label = row["label"] or f"{row['type'].capitalize()} {eid[-6:]}"
-            elif eid.startswith(SCENE_PREFIX):
-                # Facts nobody owns — an open gate, a spill — are recorded
-                # against the place rather than pinned on a bystander
-                # (store.scene_subject). They are still answers, so they surface
-                # as a pseudo-entity named for where they were seen.
-                place = eid[len(SCENE_PREFIX):]
-                etype, label = "scene", loc_names.get(place, place)
-            else:
+            if eid in rejected:
                 continue
+            row = ents.get(eid)
+            label = _label_for(eid, row, loc_names)
+            if label is None:
+                rejected.add(eid)
+                continue
+            etype = row["type"] if row is not None else "scene"
+            # Still checked here even when SQL already narrowed by it: the label
+            # filter is defined on the displayed name, and this loop is where
+            # that name is decided.
             if label_q and label_q not in label.lower():
+                rejected.add(eid)
                 continue
             ent = per_entity[eid] = {
                 "entity_id": eid, "label": label, "type": etype,
@@ -179,8 +235,6 @@ def execute(store: Store, query: dict) -> dict:
                 # the unranked one it is.
                 "match_score": None,
             }
-        elif label_q and label_q not in ent["label"].lower():
-            continue
         total += 1
         ent["n_observations"] += 1
         if hit is not None:

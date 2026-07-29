@@ -432,7 +432,7 @@ def run(args, on_frame=None, state=None) -> None:
 
     n_people = len(store.list_entities("person"))
     n_objs = len(store.list_entities("object"))
-    n_obs = len(store.observations())
+    n_obs = store.count_observations()
     total_frames = sum(state["cameras"][c["name"]].get("frames_seen", 0) for c in cameras)
     total_vlm = sum(state["cameras"][c["name"]].get("vlm_calls", 0) for c in cameras)
     print(f"\n[run] frames={total_frames}  entities: {n_people} people / {n_objs} objects  "
