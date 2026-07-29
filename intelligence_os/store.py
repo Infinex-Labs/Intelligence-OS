@@ -471,6 +471,7 @@ class Store:
                     until: Optional[float] = None,
                     location_ids: Optional[Sequence[str]] = None,
                     camera_ids: Optional[Sequence[str]] = None,
+                    entity_ids: Optional[Sequence[str]] = None,
                     limit: int = 500) -> list[sqlite3.Row]:
         """Observations whose `text` matches, best first, filtered in one statement.
 
@@ -478,6 +479,12 @@ class Store:
         over a large memory never materialises the rows outside it. `score` is
         bm25 negated: SQLite returns it smaller-is-better, and a score that grows
         with relevance is the one every caller expects.
+
+        Every filter the caller will apply later belongs here, not after: `limit`
+        cuts the ranked list, so a shortlist drawn from the whole memory and
+        *then* narrowed to one person is shorter than one drawn from that person
+        to begin with. Filtering afterwards would quietly cost recall on exactly
+        the narrow questions the filters were added to serve.
         """
         match = self.fts_query(query) if self.fts_enabled else None
         if match is None:
@@ -490,12 +497,19 @@ class Store:
             q.append("AND o.timestamp>=?"); args.append(since)
         if until is not None:
             q.append("AND o.timestamp<=?"); args.append(until)
-        if location_ids:
-            q.append(f"AND o.location_id IN ({','.join('?' * len(location_ids))})")
-            args.extend(location_ids)
-        if camera_ids:
-            q.append(f"AND o.camera_id IN ({','.join('?' * len(camera_ids))})")
-            args.extend(camera_ids)
+        # Same convention as `_obs_where`: None is no filter, an empty sequence
+        # is a filter nothing satisfies. The two must agree, because the same
+        # plan feeds both — a zone list that resolved to nothing must not return
+        # the whole ranked memory from one of them and no rows from the other.
+        for col, values in (("location_id", location_ids),
+                            ("camera_id", camera_ids),
+                            ("subject_entity_id", entity_ids)):
+            if values is None:
+                continue
+            if not values:
+                return []
+            q.append(f"AND o.{col} IN ({','.join('?' * len(values))})")
+            args.extend(values)
         q.append("ORDER BY score DESC LIMIT ?"); args.append(limit)
         try:
             return self.conn.execute(" ".join(q), args).fetchall()
@@ -888,6 +902,18 @@ class Store:
                 (camera_id,)).fetchall()
         return self.conn.execute("SELECT * FROM locations").fetchall()
 
+    def cameras(self) -> list[str]:
+        """Camera names this memory knows about, for the planner's vocabulary.
+
+        Read off `locations`, which is one row per zone and therefore tiny —
+        not `SELECT DISTINCT camera_id FROM observations`, which is the same
+        answer paid for at the size of the whole memory. A camera with no zone
+        drawn on it is invisible here; `ask` unions this with the configured
+        camera names so a freshly added camera is still nameable before anyone
+        has drawn a zone on its frame.
+        """
+        return sorted({r["camera_id"] for r in self.locations() if r["camera_id"]})
+
     # --- observations --------------------------------------------------------
     def add_observation(self, subject_entity_id: str, predicate: str, *,
                         object_entity_id: Optional[str] = None,
@@ -944,7 +970,8 @@ class Store:
 
     def _obs_where(self, *, subject_entity_id=None, since=None, until=None,
                    camera_id=None, user_id=None, location_ids=None,
-                   entity_ids=None, observation_ids=None,
+                   camera_ids=None, entity_ids=None, exclude_entity_ids=None,
+                   observation_ids=None,
                    predicate_contains=None, predicate_prefixes=None,
                    exclude_predicates=None, origins=None, min_confidence=None,
                    match_any: bool = False) -> tuple[str, list]:
@@ -971,8 +998,18 @@ class Store:
             conds.append("user_id=?"); args.append(user_id)
         if location_ids is not None:
             conds.append(any_of("location_id", location_ids))
+        if camera_ids is not None:
+            conds.append(any_of("camera_id", camera_ids))
         if entity_ids is not None:
             conds.append(any_of("subject_entity_id", entity_ids))
+        if exclude_entity_ids:
+            # Inverted, so it follows `exclude_predicates`: an empty exclusion
+            # excludes nothing. NULL is not a concern here — every observation
+            # has a subject, which is the one column the write path requires.
+            excl_e = list(exclude_entity_ids)
+            conds.append(
+                f"subject_entity_id NOT IN ({','.join('?' * len(excl_e))})")
+            args.extend(excl_e)
         if origins is not None:
             conds.append(any_of("origin", origins))
         if min_confidence is not None:
@@ -1015,7 +1052,9 @@ class Store:
                      until: Optional[float] = None,
                      *,
                      location_ids: Optional[Sequence[str]] = None,
+                     camera_ids: Optional[Sequence[str]] = None,
                      entity_ids: Optional[Sequence[str]] = None,
+                     exclude_entity_ids: Optional[Sequence[str]] = None,
                      observation_ids: Optional[Sequence[str]] = None,
                      predicate_contains: Optional[str] = None,
                      predicate_prefixes: Optional[Sequence[str]] = None,
@@ -1039,7 +1078,9 @@ class Store:
         where, args = self._obs_where(
             subject_entity_id=subject_entity_id, since=since, until=until,
             camera_id=camera_id, user_id=user_id, location_ids=location_ids,
-            entity_ids=entity_ids, observation_ids=observation_ids,
+            camera_ids=camera_ids, entity_ids=entity_ids,
+            exclude_entity_ids=exclude_entity_ids,
+            observation_ids=observation_ids,
             predicate_contains=predicate_contains,
             predicate_prefixes=predicate_prefixes,
             exclude_predicates=exclude_predicates, origins=origins,

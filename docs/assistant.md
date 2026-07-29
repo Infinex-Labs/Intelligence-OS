@@ -15,7 +15,8 @@ That is enforced by construction, not by prompting.
         ┌───────────────────────┐
         │  LLM: parse to query  │   ← the ONLY thing the model does
         └───────────┬───────────┘
-                    │  {start, end, zone, entity_label, predicate_contains}
+                    │  {intent, start, end, zones[], cameras[],
+                    │   entity_labels[], entity_type, text, order, limit, ...}
                     ▼
         ┌───────────────────────┐
         │  SQL over observations│   ← every fact comes from here
@@ -24,10 +25,17 @@ That is enforced by construction, not by prompting.
      arrivals, departures, durations, keyframes, rule events
 ```
 
-The LLM's only job is to turn the English question into a structured query:
-a time window, a zone, an entity label, a predicate filter. It is given the
-current time, the known zone names and the known entity labels, and it must
-choose from those lists.
+The LLM's only job is to turn the English question into a structured query: a
+time window, some places, some cameras, some people (or some people to leave
+out), what kind of thing, the words to look for, an order and a cap. It is given
+the current time, the known zone names, the known camera names and the known
+entity labels, and it must choose from those lists — a name that is not on a
+list does not exist in this memory, and a filter that matches nothing returns
+nothing rather than quietly widening to everything.
+
+The query also carries an `intent`, which filters nothing. It says which part of
+the result is the answer: "how many sightings at the bay" and "who was at the
+bay" run the identical query, and only one of them is asking for a number.
 
 Everything in the answer — who arrived, when they left, how long they stayed,
 which rules fired, which keyframes to show — is **aggregated deterministically

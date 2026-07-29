@@ -244,7 +244,7 @@
   question: "anyone at the loading bay or in aisle 3?"
   gap: G5
   fixed_by: 4
-  baseline: fail          # `zone` is a single string
+  baseline: pass          # Phase 4: `zones` is a list; an empty match set is a filter, not a pass
   plan: {start: null, end: null, zones: [loading_bay, aisle_3]}
   expect_entities: [dave, priya, van]
   forbid_entities: [nadia, courier, visitor]  # side_gate only; a real 2-zone filter excludes them
@@ -253,7 +253,7 @@
   question: "anyone at the side gate except the delivery courier?"
   gap: G5
   fixed_by: 4
-  baseline: fail          # no way to express "except"
+  baseline: pass          # Phase 4: `exclude_entity_labels`, resolved to ids and pushed down
   plan: {start: null, end: null, zone: side_gate,
          exclude_entity_labels: ["delivery courier"]}
   expect_entities: [nadia]
@@ -263,7 +263,7 @@
   question: "what did the yard camera see?"
   gap: G5
   fixed_by: 4
-  baseline: fail          # camera_id recorded since M6, never searchable
+  baseline: pass          # Phase 4: `cameras` — camera_id searchable at last
   plan: {start: null, end: null, cameras: [cam_yard]}
   expect_entities: [nadia, courier]
   forbid_entities: [dave]
@@ -272,7 +272,7 @@
   question: "the last two sightings anywhere"
   gap: G5
   fixed_by: 4
-  baseline: fail          # no ordering or limit
+  baseline: pass          # Phase 4: `order` + `limit`, capping subjects rather than rows
   plan: {start: null, end: null, order: desc, limit: 2}
   expect_max_entities: 2
 
@@ -280,7 +280,7 @@
   question: "which vehicles or objects were seen?"
   gap: G5
   fixed_by: 4
-  baseline: fail          # no entity_type filter
+  baseline: pass          # Phase 4: `entity_type` narrows to entities of that type
   plan: {start: null, end: null, entity_type: object}
   expect_entities: [van]
   forbid_entities: [dave, priya]
@@ -289,7 +289,7 @@
   question: "how many sightings at the loading bay?"
   gap: G5
   fixed_by: 4
-  baseline: fail          # no count intent; aggregates done in Python
+  baseline: pass          # Phase 4: `intent: count` promotes the number to the answer
   plan: {intent: count, start: null, end: null, zone: loading_bay}
   expect_min_count: 8
   expect_result_key: count

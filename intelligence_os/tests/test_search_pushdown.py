@@ -386,11 +386,20 @@ class TestANameIsNotAColumn(_Base):
         # More candidate ids than can be bound in one statement: the filter goes
         # back to the loop rather than the query failing.
         import intelligence_os.ask as ask
-        for _ in range(40):
-            self.store.create_entity("person", label="Crowd Member")
+        crowd = [self.store.create_entity("person", label=f"Crowd Member {i}")
+                 for i in range(40)]
+        for i, eid in enumerate(crowd):
+            self.store.add_observation(eid, "present", location_id=self.bay,
+                                       timestamp=T0 + 100 + i, origin="detector")
         self.addCleanup(setattr, ask, "MAX_PUSHED_IDS", ask.MAX_PUSHED_IDS)
         ask.MAX_PUSHED_IDS = 5
-        self.assertIsNone(ask._subjects_labelled(self.store, "crowd", {}))
+
+        plan = ask.normalize_plan({"entity_labels": ["crowd"]})
+        self.assertIsNone(ask._SubjectFilter(self.store, plan, {}).ids,
+                          "too many to bind — the pushdown must be dropped")
+        # Dropped, not weakened: the loop is the authority, so the answer is the
+        # same one the pushdown would have given, only slower.
+        self.assertEqual(len(self._labels("crowd")), 40)
         self.assertEqual(self._labels("ann"), ["Ann"])   # still answers
 
 

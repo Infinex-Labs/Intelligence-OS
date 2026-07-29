@@ -42,11 +42,16 @@ CASES_PATH = Path(__file__).parent / "fixtures" / "search_cases.yaml"
 # Each phase that lands extends this set. Keep the comments: they are the record
 # of what the engine could do when.
 SUPPORTED_PLAN_FIELDS = {
-    "start", "end", "zone", "entity_label", "predicate_contains",  # today (ask.py:24-45)
-    "text",                                          # Phase 2 (FTS5, ask.py:112)
-    # Phase 4 adds:  intent, zones, cameras, entity_labels, entity_type,
-    #                exclude_entity_labels, exclude_predicates, order, limit,
-    #                min_confidence, group_by
+    "start", "end", "zone", "entity_label", "predicate_contains",  # M1 five-slot form
+    "text",                                          # Phase 2 (FTS5)
+    # Phase 4 widened the form. `zone`/`entity_label` stay in the set above
+    # because `normalize_plan` still up-converts them — the old shape executes,
+    # it is just no longer what the planner emits.
+    "intent", "zones", "cameras", "entity_labels", "exclude_entity_labels",
+    "entity_type", "exclude_predicates", "min_confidence", "order", "limit",
+    # `group_by` is deliberately NOT here. `intent: how_often` now runs rather
+    # than being rejected, but a weekday bucket is Phase 5's, and listing a field
+    # the engine ignores is exactly the silent widening this set exists to catch.
 }
 
 RECALL_KS = (1, 5, 20)
@@ -92,6 +97,13 @@ def resolve_plan(case: dict, corpus: dict) -> dict:
             plan[field] = _ts(plan[field], corpus["anchor"])
     if plan.get("entity_label") is not None:
         plan["entity_label"] = labels.get(plan["entity_label"], plan["entity_label"])
+    # Phase 4's plural forms get the same treatment, one element at a time. A
+    # value that is not a corpus key still passes through untouched, which is how
+    # `exclude_entity_labels: ["delivery courier"]` names someone the way a user
+    # would type it rather than by the fixture's internal key.
+    for field in ("entity_labels", "exclude_entity_labels"):
+        if plan.get(field):
+            plan[field] = [labels.get(v, v) for v in plan[field]]
     return plan
 
 

@@ -10,6 +10,7 @@ never overwrite, so the trajectory stays in version control.
 | **1 — keep what was perceived** | 9/32 | 22/32 | 62.5% | 62.5% | 0.625 | **100.0%** | 470 | 1249 |
 | **2 — lexical index** | **17/32** | **14/32** | **72.7%** | 72.7% | **0.727** | 100.0% | 609 | 1878 |
 | **3 — filtering in the database** | 17/32 | 14/32 | 72.7% | 72.7% | 0.727 | 100.0% | **0.49** | **66.73** |
+| **4 — a wider query form** | **23/32** | **5/32** | 62.3% | **73.7%** | 0.697 | 100.0% | 20.43 | 460.08 |
 
 Latency measured at corpus scale **100000** observations. Reproduce with:
 
@@ -40,6 +41,25 @@ latency stopped being a function of *how much footage exists* and became a
 function of *how much of it the question actually asks about*, which is the
 property that has to hold as a memory ages.
 
+**The Phase 4 latency row is not comparable to Phase 3's, and not because of the
+machine.** The runner times only the cases the engine can actually run, and
+Phase 4 runs ten more of them — including the two most expensive questions in
+the suite. Different case mix, different distribution. Two numbers to read
+instead of one, both taken in the same session on the same machine:
+
+| | Phase 3 code | Phase 4 code |
+|---|---|---|
+| the 21 cases **both** can run | p50 1.44 / p95 468.97 | p50 **0.98** / p95 **430.71** |
+| every runnable case (the row above) | p50 1.44 / p95 468.97 *(21 cases)* | p50 20.43 / p95 460.08 *(31 cases)* |
+
+So Phase 4 is slightly *faster* on the questions Phase 3 could already answer —
+the ranked shortlist is now drawn from the filtered pool, so a narrow word
+question does less work — and the headline p95 moved because ten harder
+questions joined the measurement. Note also that this machine is running about
+6× slower than when the Phase 3 row was recorded: the Phase 3 code re-measured
+here gives p95 469 against its recorded 66.73. That is why the table above is
+paired rather than compared to the row.
+
 ## What the baseline row means
 
 - **silent failures** — the question had an answer in the corpus and search
@@ -53,12 +73,17 @@ property that has to hold as a memory ages.
 - **recall / MRR** — entity-level, over the cases that name expected entities.
   Through Phase 1 the ordering was `first_seen`, so MRR measured the absence of
   ranking rather than its quality. Phase 2 orders word questions by bm25, and
-  window questions still read as a timeline. At this corpus size result lists
-  are short, so recall@1 and recall@20 still coincide; they separate once
-  Phase 6 starts returning candidate sets worth cutting off.
-- **latency** — wall clock for `ask.execute()` alone, excluding both LLM calls.
-  Padding rows sit in their own zone and on their own entity, so scaling the
-  corpus changes how much the engine sifts without changing any answer.
+  window questions still read as a timeline. They coincided through Phase 3 and
+  separate at Phase 4 — see "Why recall@1 fell while recall@5 rose" below. Note
+  that the *scored set grows* as phases land: a case the engine cannot run is
+  not scored at all, so these averages are only comparable alongside the case
+  count, never on their own.
+- **latency** — wall clock for `ask.execute()` alone, excluding both LLM calls,
+  and **only over the cases the engine can run**. That set widens every phase,
+  so a latency row is a distribution over a different question mix than the row
+  above it. Padding rows sit in their own zone and on their own entity, so
+  scaling the corpus changes how much the engine sifts without changing any
+  answer — with one Phase 4 exception, `entity_type`, noted below.
 
 ## Why Phase 1 moved retention but not the case count
 
@@ -121,6 +146,76 @@ Two costs were accepted deliberately rather than optimised away:
   it would not fit in one statement's bound variables. It falls back to filtering
   in the loop. A name that matches 900 subjects was not narrowing anything.
 
+## What Phase 4 moved
+
+Eight cases flipped by Phase 2; six flip here, and they are the six the old
+five-slot form could not *express* rather than could not find. `zone` became
+`zones`, `entity_label` became `entity_labels` with an `exclude_` counterpart,
+and `cameras`, `entity_type`, `order`, `limit`, `min_confidence` and
+`exclude_predicates` joined them. `intent` joined too, and filters nothing: it
+says which part of the result is the answer.
+
+The thing worth recording is not that the filters work. It is the failure they
+replace. A question the old form could not represent was answered with the
+nearest one it could — "who was in the car park", in a memory with no such zone,
+returned everyone everywhere, because an unmatched zone name left `zone` unset
+and an unset zone means *anywhere*. Widening a query form is only an improvement
+if narrowing can still fail closed, so that is asserted directly, for every
+field, in `test_search_query_form.py::TestNarrowingNeverWidens`.
+
+### Why recall@1 fell while recall@5 rose
+
+`recall@1` 72.7% → 62.3%, `recall@5` 72.7% → 73.7%, MRR 0.727 → 0.697. No case
+got worse. Over the eleven cases scored under Phase 3, the numbers are
+**unchanged at 0.727 / 0.727 / 0.727**; the averages moved because eight more
+cases entered the scored set. Four of those are Phase 4's own and pass. The
+other four are Phase 5's — they used to be rejected before running, and now run
+and return raw rows in place of the aggregate they need. They are ranked, badly,
+where before they were not ranked at all.
+
+This is the first phase where recall@1 and recall@5 separate. The note above
+predicted that would happen in Phase 6; it happened here, for the opposite
+reason. The right entity is in the list and not at the top, which is a ranking
+problem — the kind Phase 6 is for.
+
+### Silent failures 14 → 5
+
+The nine that went away are the six G5 cases plus three of Phase 5's
+(`recurrence_van_how_often`, `copresence_who_with_priya`,
+`copresence_two_at_gate`). The Phase 5 three still **fail** — their
+`expect_result_key` is absent, because raw rows are not the aggregate they asked
+for — but they now return evidence instead of nothing. A wrong-shaped answer is
+a visible failure; an empty one is indistinguishable from "it never happened".
+So the case count moved by six and this column by nine: three questions stopped
+being invisible without yet being answered.
+
+The five that remain are the four `paraphrase_*` cases, which need meaning
+(Phase 6), and `recurrence_van_weekday`, which is still rejected before running
+because `group_by` is deliberately unsupported until Phase 5.
+
+### The two slow cases
+
+`entity_type_objects_only` and `limit_last_two` each take about 5 s at 100k rows,
+and between them they are the whole p95. Both aggregate every padding row,
+because the padding puts all 100,000 of them on a **single** subject and a
+per-entity aggregate spans all of that subject's rows. Profiled: ~3.2 s
+materialising the rows, ~2.3 s in the aggregation loop. Nothing wasteful, just
+100k rows.
+
+A real memory of that size spreads its rows over hundreds of subjects, so no
+single aggregate is that large — this is the fixture's worst case, and
+`search_corpus.py` says why it is left that way rather than spread out. What
+would actually remove it is computing the aggregate in SQL instead of in the
+loop, which is the same lever Phase 5 needs for habits and co-presence.
+
+`limit_last_two` is still bounded where it counts: "the last two subjects" no
+longer reads the whole memory to find them. A bounded walk in the requested
+order takes the first *n* distinct subjects — correct because a subject's
+`last_seen` is where it first appears reading backwards — and only those
+subjects are then aggregated. Here one of the two happens to be the subject with
+100k rows. `test_a_limited_question_does_not_read_the_whole_memory` covers the
+ordinary case.
+
 ## Baseline detail
 
 Still-failing rows below are stated as of the latest phase row above.
@@ -144,12 +239,12 @@ Still-failing rows below are stated as of the latest phase row above.
 | `stem_parcels` | G1 | 2 | ✅ |
 | `stopword_on_the_phone` | G1 | 2 | ✅ |
 | `term_order_flickering_light` | G1 | 2 | ✅ |
-| `camera_filter_yard` | G5 | 4 | ❌ |
-| `count_sightings_at_bay` | G5 | 4 | ❌ |
-| `entity_type_objects_only` | G5 | 4 | ❌ |
-| `exclude_the_courier` | G5 | 4 | ❌ |
-| `limit_last_two` | G5 | 4 | ❌ |
-| `multi_zone_bay_or_aisle` | G5 | 4 | ❌ |
+| `camera_filter_yard` | G5 | 4 | ✅ |
+| `count_sightings_at_bay` | G5 | 4 | ✅ |
+| `entity_type_objects_only` | G5 | 4 | ✅ |
+| `exclude_the_courier` | G5 | 4 | ✅ |
+| `limit_last_two` | G5 | 4 | ✅ |
+| `multi_zone_bay_or_aisle` | G5 | 4 | ✅ |
 | `copresence_two_at_gate` | G3 | 5 | ❌ |
 | `copresence_who_with_priya` | G3 | 5 | ❌ |
 | `recurrence_van_how_often` | G3 | 5 | ❌ |

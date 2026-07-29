@@ -189,6 +189,20 @@ def build(store: Store, *, scale: int = 0) -> dict:
     if scale:
         # A dedicated filler entity in its own zone: padding must never change
         # what a correctness case sees, only how much the engine has to sift.
+        #
+        # ONE entity holds every padding row, and Phase 4 is where that starts
+        # to matter. A per-entity aggregate spans all of that entity's rows, so
+        # any question this subject answers costs a 100k-row aggregate — where a
+        # real memory of the same size spreads those rows over hundreds of
+        # subjects and no single aggregate is large. It is the fixture's worst
+        # case, not a typical one, and it is what the two slowest scaled cases
+        # in docs/search-baseline.md are measuring.
+        #
+        # Left as it is on purpose. Spreading the padding would be more
+        # realistic and would silently invalidate every latency row already
+        # recorded against this corpus, which is the one thing the scorecard is
+        # built to prevent. Changing it is a decision for whichever phase is
+        # willing to re-measure the whole trajectory.
         filler = store.create_entity("object", label="Filler Crate")
         filler_zone = store.upsert_location(
             "filler_store", {"polygon": [[9, 9], [10, 9], [10, 10]]}, camera_id="cam_dock")

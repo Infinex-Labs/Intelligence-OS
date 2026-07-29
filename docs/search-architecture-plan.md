@@ -1,6 +1,6 @@
 # Search & Retrieval Architecture Plan
 
-**Status:** Phases 0–3 landed; 4–8 still proposal. See
+**Status:** Phases 0–4 landed; 5–8 still proposal. See
 [`search-baseline.md`](search-baseline.md) for the scored trajectory.
 **Scope:** the query/retrieval layers of Intelligence OS — `ask.py`, the search
 surface of `store.py`, the memory-write path in `run.py`/`vlm.py`, and the
@@ -539,7 +539,7 @@ here, but they are where the same treatment pays next.
 
 ---
 
-### Phase 4 — Widen the query form (the Query stage)
+### Phase 4 — Widen the query form (the Query stage) ✅ DONE
 
 **Why.** G5. The five-slot form cannot express most real investigative questions.
 
@@ -574,6 +574,75 @@ plan-accuracy cases run against a live key, marked `slow`.
 
 **Done when.** All Phase 0 structured cases plan correctly, and old-shape plans
 still execute.
+
+**Result.** Landed as specified, plus two things the spec did not ask for.
+
+| | before | after |
+|---|---|---|
+| cases passing | 17/32 | **23/32** |
+| silent failures | 14/32 | **5/32** |
+| tests | 209 | **266** |
+| the 21 cases Phase 3 could run, p95 | 468.97 ms | **430.71 ms** |
+
+All six G5 cases flip. The other twenty-six answer **byte-identically** to
+before — diffed field by field, same harness as Phase 3, so "we only changed
+what we meant to change" is a check rather than a claim.
+
+Recorded decisions:
+
+- **`predicate_contains` was not retired, only removed from the schema.** The
+  spec says `text` replaces it. It does for the *planner* — the tool no longer
+  offers the field — but `normalize_plan` still honours it, because they are not
+  synonyms: `text` is the lexical index alone, while `predicate_contains` also
+  keeps a literal substring test, and that is the machine contract `rule_fired`
+  is matched on. Three currently-passing cases go through it. Folding it into
+  `text` would have silently dropped half of a filter, which is the exact class
+  of bug this phase exists to remove.
+- **`limit` caps subjects, not rows.** SQL's `LIMIT` would be faster and wrong:
+  an entity's `first_seen`, duration and states are aggregates over *all* of its
+  rows, so truncating rows returns subjects with a quietly truncated history
+  rather than fewer subjects. What did get optimised is finding *which*
+  subjects: a bounded walk in the requested order takes the first *n* distinct
+  ones, which is exact because a subject's `last_seen` is where it first appears
+  reading backwards. So "the last two sightings" no longer aggregates the whole
+  memory to throw all but two away.
+- **A zone name that matches nothing now matches nothing.** Previously an
+  unrecognised `zone` left the filter unset, and unset means *anywhere* — so
+  asking about a place that does not exist returned everyone, everywhere,
+  confidently. Every new filter is asserted to fail closed
+  (`TestNarrowingNeverWidens`), because a wider form is only an improvement if
+  narrowing can still come back empty.
+- **`intent` routes `count` only.** `how_often`, `who_with` and `relations` are
+  in the enum and parse, so the planner's vocabulary will not have to change
+  again, but they reach their aggregates in Phase 5. Their cases now *run* and
+  fail on the missing `expect_result_key` rather than being rejected before
+  execution — which is why silent failures fell by nine while the case count
+  moved by six.
+- **`group_by` was deliberately left unsupported.** It is Phase 5's, and listing
+  a field the engine ignores is the silent widening the harness exists to catch.
+
+Not in the spec, done anyway:
+
+- **The ranked shortlist is drawn from the filtered pool.** `search_text` caps
+  its bm25 list, so filtering *after* it cost recall on exactly the narrow
+  questions the new filters serve. It now takes the zone, camera and entity
+  filters directly. This is why the shared-case p95 improved.
+- **`entity_type: scene`.** A fact nobody owns — an open gate, a spill — is
+  recorded against the place, and `person | object | any` gave no way to ask for
+  those specifically.
+
+**Still scanning elsewhere.** `entity_type_objects_only` and `limit_last_two`
+take ~5 s at 100k rows: both aggregate every padding row because the fixture
+puts all 100,000 on one subject, and a per-entity aggregate spans all of that
+subject's rows (~3.2 s materialising, ~2.3 s in the loop — nothing wasteful).
+Removing it means computing aggregates in SQL rather than in the Python loop,
+which is the same lever Phase 5 needs. `distill.py:147,194` and `rules.py:228`
+still scan and filter in Python, unchanged since Phase 3.
+
+**Not done here.** The plan-accuracy suite against a live key is still not
+written; the widened schema is exercised by 57 unit tests against stubbed plans,
+which measures the engine and not the planner. That gap is unchanged from Phase
+0 and is now larger, since there is more schema to get wrong.
 
 ---
 
