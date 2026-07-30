@@ -53,9 +53,30 @@ SUPPORTED_PLAN_FIELDS = {
     # than being ignored: it chooses which buckets a recurrence is cut into, so
     # "mostly on Tuesdays?" and "how often?" no longer return the same thing.
     "group_by",
+    # Phase 6 added no plan field. It changed how `text` is answered — two
+    # indexes fused instead of one — which is a retrieval change, not a query
+    # form change, and the case list is unchanged as a result.
 }
 
 RECALL_KS = (1, 5, 20)
+
+
+def expected_baseline(case: dict, semantic_on: bool) -> str:
+    """Which baseline this case is held to, given what the machine has.
+
+    Phase 6's paraphrase cases can only pass where a local embedding model
+    exists, and the plan is explicit that the suite must stay green with the
+    dependency uninstalled. So those cases carry two recorded baselines and the
+    runner picks by what the corpus actually managed to embed — measured, not
+    declared, and not a config flag either.
+
+    The ratchet survives intact in both modes: each is asserted in both
+    directions, so a regression with the model installed is as loud as a
+    regression without it, and neither can improve silently.
+    """
+    if semantic_on and case.get("baseline_semantic"):
+        return case["baseline_semantic"]
+    return case.get("baseline", "fail")
 
 
 def load_cases() -> list[dict]:
@@ -198,6 +219,7 @@ def rank_metrics(case: dict, result: dict, corpus: dict) -> dict | None:
 def run_case(case: dict, corpus: dict) -> dict:
     """Execute one case. Never raises: a crash is a result, and a scored one."""
     store: Store = corpus["_store"]
+    semantic_on = bool(corpus.get("semantic"))
     plan = resolve_plan(case, corpus)
     missing = unsupported_fields(plan)
 
@@ -222,7 +244,7 @@ def run_case(case: dict, corpus: dict) -> dict:
         "question": case["question"],
         "gap": case.get("gap", "none"),
         "fixed_by": case.get("fixed_by", 0),
-        "baseline": case.get("baseline", "fail"),
+        "baseline": expected_baseline(case, semantic_on),
         "actual": "pass" if passed else "fail",
         "why": why,
         "unsupported": missing,
@@ -265,6 +287,11 @@ def run_all(scale: int = 0) -> dict:
             },
             "retention": search_corpus.retention(corpus["_store"]),
             "scale": scale,
+            # How many vectors the corpus managed to build. 0 means this machine
+            # has no local embedding model, and every number above was measured
+            # against Phase 2's lexical retrieval — which the scorecard has to
+            # say out loud, or two runs on two laptops read as a regression.
+            "semantic": corpus.get("semantic", 0),
         }
     finally:
         corpus["_store"].close()

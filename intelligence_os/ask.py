@@ -19,6 +19,7 @@ import time
 from collections import Counter, defaultdict
 from typing import Optional
 
+from . import semantic
 from .config import CONFIG
 from .distill import WEEKDAY_ABBR, bucket_day, bucket_hour, bucket_weekday
 from .store import SCENE_PREFIX, Store
@@ -477,6 +478,146 @@ def _zone_ids(names, loc_names: dict) -> Optional[list[str]]:
     return [lid for lid, name in loc_names.items() if (name or "").lower() in wanted]
 
 
+# --- retrieval and fusion (search plan Phase 6) ------------------------------
+#
+# Two indexes now answer a word question, and they fail in opposite directions.
+# The lexical one is exact and literal: it finds the row that used the asker's
+# word and nothing else, so it is silent whenever the memory happened to write
+# the thing down differently. The semantic one is the reverse — it finds the row
+# that MEANS the same thing and cannot tell you which word made it a match, so
+# on its own it is confident about rows nobody would accept.
+#
+# Reciprocal Rank Fusion is what lets both be wrong without the answer being
+# wrong. It scores by POSITION rather than by score, which matters because bm25
+# and cosine are not on a common scale and never can be: bm25 is relative to a
+# corpus, cosine is an angle. Ranks are comparable by construction, so no
+# calibration step exists to drift.
+#
+# What fusion is not allowed to do: widen. Both lists are drawn from the same
+# hard-filtered candidates, so a ranker can only reorder what the window, the
+# zone, the camera and the subject already permitted.
+
+MAX_HITS_SHOWN = 6              # per entity; collapsed first, then best-scored
+
+
+def _fuse(*ranked_lists: tuple[str, list[str]]) -> tuple[dict, dict]:
+    """RRF over `(name, [ids in rank order])`. Returns (scores, reasons).
+
+    `score = Σ 1/(k + rank)`, the standard form. With one list this is
+    order-preserving — it is 1/(k+rank), which is monotone in rank — so a
+    deployment with no semantic index gets EXACTLY the ordering Phase 2 gave it.
+    That property is why the fusion is unconditional rather than switched on
+    when a second list exists: one code path, and no configuration under which
+    the ranking silently becomes a different algorithm.
+
+    `reasons` records which index found a row, and is carried through to the
+    answer. A hit nobody can explain is the thing this layer is most at risk of
+    producing, so every hit says whether a word matched, a meaning matched, or
+    both agreed.
+    """
+    k = float(CONFIG.semantic.rrf_k)
+    scores: dict[str, float] = {}
+    reasons: dict[str, str] = {}
+    for name, ids in ranked_lists:
+        for rank, oid in enumerate(ids, start=1):
+            scores[oid] = scores.get(oid, 0.0) + 1.0 / (k + rank)
+            prev = reasons.get(oid)
+            reasons[oid] = name if prev is None else ("both" if prev != name else prev)
+    return scores, reasons
+
+
+def _retrieve(store: Store, text_q: str, pred_q: str, *, plan: dict, loc_ids,
+              cam_ids, entity_ids) -> tuple[dict, dict, dict]:
+    """The ranked candidate ids for a word question, fused.
+
+    Returns (scores, reasons, summary). The summary goes into the trace, and it
+    earns its place: "no results" and "the semantic index has never been built"
+    look identical from the outside, and the second one is fixed by running a
+    backfill rather than by rephrasing the question.
+
+    `text` goes to both indexes; `predicate_contains` goes only to the lexical
+    one, and that is a deliberate asymmetry rather than an oversight. `text` is
+    the search surface — the words a person typed, meant as prose. Phase 4
+    removed `predicate_contains` from the planner's tool schema entirely; what
+    is left of it is the machine contract that `rule_fired:` is matched on, an
+    exact-substring promise about an identifier. Handing an identifier to a
+    meaning ranker asks it which predicates FEEL like 'rule_fired', which is not
+    a question with an answer.
+    """
+    lexical = [r["observation_id"] for r in store.search_text(
+        text_q or pred_q, since=plan["start"], until=plan["end"],
+        location_ids=loc_ids, camera_ids=cam_ids, entity_ids=entity_ids)]
+    meaning: list[str] = []
+    if text_q:
+        meaning = [oid for oid, _score in semantic.search(
+            store, text_q, since=plan["start"], until=plan["end"],
+            location_ids=loc_ids, camera_ids=cam_ids, entity_ids=entity_ids)]
+    scores, reasons = _fuse(("lexical", lexical), ("semantic", meaning))
+    return scores, reasons, {
+        "lexical": len(lexical),
+        "semantic": len(meaning),
+        "fused": len(scores),
+        # Read off the index rather than off the result, so an empty answer can
+        # still say whether meaning was consulted at all.
+        "semantic_index": store.embedded_count(store.EMBED_OBSERVATION,
+                                               semantic.model_name()),
+        "searched_with": text_q or pred_q,
+    }
+
+
+def _diverse_keyframes(frames: list[tuple[float, str]], k: int) -> list[str]:
+    """`k` keyframes spread across the time they cover, not the first `k`.
+
+    Rows arrive in timestamp order, so taking the first four gives four pictures
+    of the first minute of an hour on camera — four frames of somebody walking
+    in, and nothing of what they then did. Endpoints are always kept, because
+    "when did this start" and "what did it look like by the end" are the two
+    questions a strip of evidence is actually read for.
+
+    Deterministic: the same rows always yield the same strip, which a stored
+    conversation turn depends on to replay as what it showed at the time.
+    """
+    if k < 1 or not frames:
+        return []
+    if len(frames) <= k:
+        return [url for _ts, url in frames]
+    last = len(frames) - 1
+    picks = dict.fromkeys(round(i * last / (k - 1)) for i in range(k))
+    return [frames[i][1] for i in picks]
+
+
+def _collapse(hits: list[dict], window: float) -> list[dict]:
+    """Runs of the same predicate inside `window` seconds, as one hit with a count.
+
+    A settled scene is re-described every few seconds, so one open gate becomes
+    thirty identical rows. Listed individually they read as thirty events, and
+    they crowd every other fact out of an answer that has a limit on it. Merged,
+    they read as what they are: one thing, seen thirty times, over this stretch.
+
+    The merged hit keeps the BEST score and the strongest reason in the run, not
+    the first — the run is one claim, so it is as well-evidenced as its best
+    evidence.
+    """
+    out: list[dict] = []
+    for hit in sorted(hits, key=lambda h: (h["predicate"], h["first_seen"])):
+        prev = out[-1] if out else None
+        if (prev is not None and prev["predicate"] == hit["predicate"]
+                and hit["first_seen"] - prev["last_seen"] <= window):
+            prev["n"] += 1
+            prev["last_seen"] = max(prev["last_seen"], hit["last_seen"])
+            if hit["score"] is not None and (prev["score"] is None
+                                             or hit["score"] > prev["score"]):
+                prev["score"] = hit["score"]
+                prev["observation_id"] = hit["observation_id"]
+            if hit["match_reason"] and prev["match_reason"] != hit["match_reason"]:
+                prev["match_reason"] = ("both" if prev["match_reason"]
+                                        else hit["match_reason"])
+            continue
+        out.append(dict(hit))
+    return sorted(out, key=lambda h: (h["score"] is None, -(h["score"] or 0.0),
+                                      h["first_seen"]))
+
+
 # --- the three aggregates (search plan Phase 5) ------------------------------
 #
 # Everything above answers out of `observations`. These three do not, and that is
@@ -735,17 +876,23 @@ def _entities_from_evidence(evidence: dict, loc_names: dict,
             continue
         label, etype = known[eid]
         times = [r["timestamp"] for r in rows]
-        keyframes = []
+        frames, seen = [], set()
         for r in rows:
             url = _kf(r["source_ref"])
-            if url and url not in keyframes:
-                keyframes.append(url)
+            if url and url not in seen:
+                seen.add(url)
+                frames.append((r["timestamp"], url))
         out.append({
             "entity_id": eid, "label": label, "type": etype,
             "first_seen": min(times), "last_seen": max(times),
             "duration_s": round(max(times) - min(times), 1),
             "n_observations": len(rows), "states": [], "rule_events": [],
-            "keyframes": keyframes[:4], "match_score": None,
+            # Picked for time coverage, like the row path's — an edge's evidence
+            # spans every reinforcement it ever had, so the first four frames of
+            # it are four pictures of the day the belief started.
+            "keyframes": _diverse_keyframes(sorted(frames),
+                                            CONFIG.semantic.max_keyframes),
+            "match_score": None, "match_reason": None, "hits": [],
         })
     return out
 
@@ -801,12 +948,18 @@ def execute(store: Store, query: dict) -> dict:
     # capped, so a ranked list drawn from the whole memory and then narrowed to
     # one zone is shorter than one drawn from that zone — the narrow question
     # would have paid for the filter in recall.
+    #
+    # Phase 6 made this two shortlists fused into one. `scores` is no longer bm25
+    # — it is the RRF score — and `reasons` says which index put each row there.
+    # The union handed to SQL below is unchanged in shape and strictly wider in
+    # content, which is the only direction a retrieval phase may move it.
     scores: dict[str, float] = {}
+    reasons: dict[str, str] = {}
+    retrieval = None
     if text_q or pred_q:
-        for r in store.search_text(text_q or pred_q, since=start, until=end,
-                                   location_ids=loc_ids, camera_ids=cam_ids,
-                                   entity_ids=subjects.ids):
-            scores[r["observation_id"]] = r["score"]
+        scores, reasons, retrieval = _retrieve(
+            store, text_q, pred_q, plan=plan, loc_ids=loc_ids, cam_ids=cam_ids,
+            entity_ids=subjects.ids)
 
     # Phase 3: the window, the zone and the words are all decided by SQLite now.
     # This used to read the whole table and drop rows in a Python loop, which
@@ -845,6 +998,7 @@ def execute(store: Store, query: dict) -> dict:
 
     per_entity: dict[str, dict] = {}
     rejected: set[str] = set()      # ids already judged: unresolvable, or wrong label
+    seen_frames: dict[str, set] = defaultdict(set)   # dedupe before the ordering
     # Kept beside the entities rather than on them, so a question that is not
     # about recurrence carries none of this in its payload.
     want_recurrence = plan["intent"] == "how_often"
@@ -878,6 +1032,12 @@ def execute(store: Store, query: dict) -> dict:
                 # calling that a zero would rank it as the worst match instead of
                 # the unranked one it is.
                 "match_score": None,
+                # Which index reached this entity — 'lexical', 'semantic',
+                # 'both', or None for a row nothing ranked. Phase 6 can surface
+                # a row on meaning alone, so an answer has to be able to say
+                # that is what happened rather than implying a word matched.
+                "match_reason": None,
+                "hits": [],
             }
         ent["n_observations"] += 1
         if hit is not None:
@@ -885,6 +1045,16 @@ def execute(store: Store, query: dict) -> dict:
             # rank whoever was on camera longest, which is presence, not answer.
             prev = ent["match_score"]
             ent["match_score"] = hit if prev is None else max(prev, hit)
+            why = reasons.get(o["observation_id"])
+            was = ent["match_reason"]
+            ent["match_reason"] = why if was is None else (
+                was if was == why else "both")
+            ent["hits"].append({
+                "predicate": o["predicate"], "text": o["text"] or o["predicate"],
+                "first_seen": o["timestamp"], "last_seen": o["timestamp"], "n": 1,
+                "score": hit, "match_reason": why,
+                "observation_id": o["observation_id"],
+            })
         ent["first_seen"] = min(ent["first_seen"], o["timestamp"])
         ent["last_seen"] = max(ent["last_seen"], o["timestamp"])
         if want_recurrence:
@@ -906,9 +1076,14 @@ def execute(store: Store, query: dict) -> dict:
         elif o["origin"] == "vlm" and pred not in ent["states"]:
             ent["states"].append(pred)
         if o["source_ref"]:
+            # Carried with its timestamp, because Phase 6 picks the strip for
+            # time coverage rather than taking whatever came first. Deduped by
+            # URL, so one keyframe shared by six rows of the same report is one
+            # picture, and it is dated by the first row that cited it.
             url = _kf(o["source_ref"])
-            if url not in ent["keyframes"]:
-                ent["keyframes"].append(url)
+            if url not in seen_frames[eid]:
+                seen_frames[eid].add(url)
+                ent["keyframes"].append((o["timestamp"], url))
 
     # A word question asks "who best fits these words", so it comes back ranked;
     # anything else is a window over a period, and reads as a timeline.
@@ -937,10 +1112,18 @@ def execute(store: Store, query: dict) -> dict:
     if plan["limit"] is not None:
         entities = entities[:plan["limit"]]
 
+    cfg = CONFIG.semantic
     for e in entities:
         e["duration_s"] = round(e["last_seen"] - e["first_seen"], 1)
-        e["keyframes"] = e["keyframes"][:4]
+        # Sorted by time here rather than at collection: rows arrive in the
+        # order the question asked for, and a `desc` question would otherwise
+        # hand the picker a reversed list and get its endpoints backwards.
+        e["keyframes"] = _diverse_keyframes(sorted(e["keyframes"]),
+                                            cfg.max_keyframes)
         e["states"] = e["states"][:8]
+        e["hits"] = _collapse(e["hits"], cfg.collapse_seconds)[:MAX_HITS_SHOWN]
+        for h in e["hits"]:
+            h["score"] = None if h["score"] is None else float(f"{h['score']:.6g}")
         if e["match_score"] is not None:
             e["match_score"] = float(f"{e['match_score']:.6g}")
 
@@ -950,6 +1133,11 @@ def execute(store: Store, query: dict) -> dict:
     total = sum(e["n_observations"] for e in entities)
     result = {"query": query, "plan": plan, "total_observations": total,
               "entities": entities, "ranked": bool(text_q or pred_q)}
+    if retrieval is not None:
+        # Part of the trace, not part of the answer. It says how the candidates
+        # were found — which is the difference between "memory does not contain
+        # this" and "the index that would have found it was never built".
+        result["retrieval"] = retrieval
     if plan["intent"] == "count":
         # The same number the evidence already carried, promoted to the answer.
         # "How many" and "who" run the identical query — what differs is which
@@ -981,6 +1169,10 @@ NARRATE_SYSTEM = (
     "events. Times are already formatted for you. Reply in 2-4 natural sentences, the "
     "way you'd tell a colleague what the footage shows, and pick up naturally from the "
     "earlier conversation (resolve 'them', 'that', 'the same person'). But every fact "
+    "A row marked matched_by 'semantic' was found by MEANING, not by the words asked: "
+    "say what was actually recorded ('the closest thing recorded is \"standing around, "
+    "waiting\"') rather than repeating the question's wording back as if the memory used "
+    "it. Every fact "
     "you state — every name, time, count, place, event — must come from THIS question's "
     "JSON, never from memory of earlier turns and never invented; prior turns are for "
     "tone and pronouns only. Never soften or inflate the numbers. If the summary is "
@@ -1005,6 +1197,15 @@ def _facts(result: dict) -> dict:
             "states": [s.replace("state:", "").replace("_", " ") for s in e["states"]],
             "rule_events": [{"rule": ev["rule"].replace("_", " "), "at": t(ev["timestamp"])}
                             for ev in e["rule_events"]],
+            # Phase 6. A row reached by meaning alone used different words from
+            # the ones asked, so the prose must be able to say "the closest
+            # thing recorded was..." rather than implying the memory used the
+            # asker's phrasing. Omitted entirely for an unranked question, where
+            # there is nothing to explain.
+            **({"matched_by": e["match_reason"]} if e.get("match_reason") else {}),
+            **({"what_matched": [
+                f"{h['text']}" + (f" (x{h['n']})" if h["n"] > 1 else "")
+                for h in e["hits"]]} if e.get("hits") else {}),
         } for e in result["entities"]],
     }
     if result.get("count") is not None:
@@ -1119,9 +1320,14 @@ def render_text(result: dict) -> str:
     lines.append(f"{len(result['entities'])} entit(y/ies), "
                  f"{result['total_observations']} observation(s) in window.")
     for e in result["entities"]:
-        lines.append(f"\n{e['label']}  ({e['entity_id']})")
+        why = f"  [{e['match_reason']}]" if e.get("match_reason") else ""
+        lines.append(f"\n{e['label']}  ({e['entity_id']}){why}")
         lines.append(f"  seen {t(e['first_seen'])} -> {t(e['last_seen'])}"
                      f"  ({e['duration_s']}s, {e['n_observations']} obs)")
+        for h in e.get("hits") or []:
+            times = f" x{h['n']}" if h["n"] > 1 else ""
+            lines.append(f"  match: {h['text']}{times}  "
+                         f"({h['match_reason']}, {h['score']})")
         for ev in e["rule_events"]:
             lines.append(f"  RULE FIRED {ev['rule']} @ {t(ev['timestamp'])}  {ev['keyframe']}")
         for s in e["states"]:

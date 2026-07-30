@@ -78,6 +78,18 @@ def render(report: dict) -> str:
     w(f"  latency  p50 {lat['p50']:>8.2f} ms   p95 {lat['p95']:>8.2f} ms"
       f"   (corpus scale: {report['scale'] or 'unscaled'})")
 
+    # Stated, never inferred. Every number above means something different in
+    # the two modes, and two runs on two laptops would otherwise read as a
+    # regression in the code rather than a difference in what was installed.
+    n = report.get("semantic", 0)
+    w("")
+    if n:
+        w(f"  SEMANTIC INDEX         {n} vector(s) — meaning-based retrieval is ON")
+    else:
+        w("  SEMANTIC INDEX         none — lexical only (Phase 2 behaviour).")
+        w("                         pip install sentence-transformers, or unset "
+          "INTELLIGENCE_OS_NO_SEMANTIC")
+
     # --- what is blocking what ---------------------------------------------
     by_phase: dict[int, list[str]] = {}
     for r in report["cases"]:

@@ -1,6 +1,6 @@
 # Search & Retrieval Architecture Plan
 
-**Status:** Phases 0–5 landed; 6–8 still proposal. See
+**Status:** Phases 0–6 landed; 7–8 still proposal. See
 [`search-baseline.md`](search-baseline.md) for the scored trajectory.
 **Scope:** the query/retrieval layers of Intelligence OS — `ask.py`, the search
 surface of `store.py`, the memory-write path in `run.py`/`vlm.py`, and the
@@ -764,14 +764,14 @@ confidently wrong filter — the gap is worth more than it was.
 
 ---
 
-### Phase 6 — Semantic retrieval and fusion (Retrieval + Selection)
+### Phase 6 — Semantic retrieval and fusion (Retrieval + Selection) ✅ DONE
 
 **Why.** Phase 2 fixes word *variants*. It does not fix different *vocabulary*:
 `"loitering"` will never lexically match `"standing around, waiting"`. This is
 the last big slice of G1.
 
-**Dependency decision — open.** Needs a local sentence-embedding model
-(~90MB, e.g. `all-MiniLM-L6-v2` via `sentence-transformers`). **torch is already
+**Dependency decision — answered: yes, optional.** Needs a local
+sentence-embedding model via `sentence-transformers`. **torch is already
 installed via ultralytics**, so marginal install weight is small and it runs
 fully offline — the no-cloud-keys promise holds. It goes in the *optional*
 dependency block in `requirements.txt` alongside `insightface`, and search
@@ -818,6 +818,67 @@ and off if the dep is missing.
 
 **Done when.** Paraphrase cases pass, silent-failure rate drops sharply, p95
 holds sub-second, and the suite still passes with the dependency uninstalled.
+
+**Result.** All four met. `28/32 → 32/32`, silent failures `4 → 0`, recall@1
+`76.7% → 91.7%`, recall@5 `85.0% → 100%`, MRR `0.850 → 1.000`, tests `312 → 352`.
+p95 328 ms at 100k, well under the bar. With the dependency uninstalled the
+scorecard is Phase 5's to the decimal and the whole suite is green — asserted on
+every run, not checked once.
+
+Decisions taken, and why:
+
+1. **The model is `all-MiniLM-L12-v2`, not the L6 named above.** Rejected on
+   measurement: L6 puts a real answer (`loitering` → `standing around, waiting`,
+   0.276) and pure noise (`dog`, 0.248) 0.028 apart, so no floor separates them
+   — either the paraphrase fails or an absent thing gets an answer. L12 opens
+   that gap to 0.142 for 30MB more. `bge-small` was also tried and is worse for
+   this: it scores everything high (0.494 for `dog`) because it is trained to
+   rank, and a ranker has nothing to say about an absolute yes/no. Full table in
+   the baseline doc.
+2. **The floor gates; bm25 still only orders.** `min_similarity = 0.30`, in the
+   middle of that gap. Cosine is an angle and comparable across queries, so it
+   *can* be a threshold — and must be, or every question returns the nearest
+   sentence in memory whether or not anything answers it.
+3. **Vectors are built by the distillation pass, not on insert.** The spec said
+   "incremental embedding on write"; the observation write path runs per frame,
+   per camera, all day, and a matrix multiply does not belong there. The cost is
+   that a row is lexically searchable at once and semantically searchable one
+   tick later — the same lag the mined habits already have, and now documented.
+4. **`text` goes to both indexes; `predicate_contains` goes only to the lexical
+   one.** What is left of that field is the machine contract `rule_fired:` is
+   matched on. Asking a meaning ranker which predicates *feel like* an
+   identifier is not a question with an answer.
+5. **Fusion is unconditional.** RRF over one list is order-preserving, so a
+   deployment with no index gets exactly Phase 2's ranking through the same code
+   path — rather than a branch under which the ranking silently becomes a
+   different algorithm.
+
+**Not in the spec, done anyway:**
+
+- `cascade_delete` now removes a subject's vectors. An embedding of "holding the
+  gate open" is derived data about a person; a §11 privacy removal that left it
+  behind would delete them by name and leave the sentence searchable by meaning.
+- Query vectors are cached (LRU 256). The forward pass is ~70 ms and is the
+  entire cost of a semantic search; questions repeat far more than they look
+  like they do. Cleared on encoder swap, since the cache is keyed on text alone.
+- `INTELLIGENCE_OS_NO_SEMANTIC=1` and a two-baseline case format, so "does this
+  still work without the dependency?" is answered on every run instead of once,
+  on a laptop, by uninstalling things.
+- `UNIQUE(kind, ref_id, model)` on the index. The backfill is a batch job that
+  will be interrupted and re-run nightly forever; without it each run adds
+  another copy of every vector and quietly weights those rows higher.
+
+**Known limitation, stated rather than hidden:** a meaning index cannot read
+negation. Asked for `"gate open"` the model ranks `"gate — closed"` (0.760) above
+`"gate — open, unlatched"` (0.711). This is a property of sentence embeddings,
+and a large part of why fusion is not a replacement for the lexical index — bm25
+on the word *open* does tell those apart. Every hit carries `match_reason` so a
+reader can see which index believed what.
+
+**Not done here:** near-duplicate collapsing exists but is not applied to
+`states`, whose shape is a public contract several callers read; it surfaces as
+a parallel `hits` list instead. The `description` embedding kind is defined in
+the schema and unused — nothing reads whole-report vectors yet.
 
 ---
 
@@ -885,16 +946,19 @@ scorecard shows a real appearance-query gap. **Off by default** if built.
 | 3 · SQL pushdown | none | **medium** | yes (refactor) | flat latency, aggregates |
 | 4 · Query form | none | medium | yes (compat shim) | real questions + `intent` |
 | 5 · Habits + who-with | none | medium | yes (additive) | **2 README questions** |
-| 6 · Semantic + fusion | **~90MB** | med-high | yes (flag) | paraphrase |
+| 6 · Semantic + fusion | **~120MB** | med-high | yes (flag) | paraphrase |
 | 7 · Reflection | none | low-med | yes (flag) | no silent failures |
 | 8 · Visual | ~350MB | high | yes (flag) | appearance queries |
 
 **Phases 0–5 need no new dependencies** and fix the data loss, the unreachable
 habits, the latency ceiling, and most guesswork. Phase 6 is the only one gated on
-a dependency decision.
+a dependency decision, and it is optional rather than required: without it the
+scorecard is Phase 5's exactly, which is the property that made the decision
+easy to take.
 
 Recommended: **0 → 1 → 2 → 3** as foundations (measurable, no deps, no behaviour
 change you rely on), then **4 → 5** for the largest visible win, then **6 → 7**.
+0–6 are done; **7 is next**, and it needs nothing installed.
 
 ---
 
@@ -960,8 +1024,12 @@ now. Tracked in `docs/search-baseline.md`, one row per phase:
 
 ## 8. Open questions
 
-1. **Phase 6 dependency** — is a ~90MB local model acceptable in the optional
-   block? *Blocks Phase 6 only; 0–5 proceed regardless.*
+1. ~~**Phase 6 dependency**~~ — **answered: yes, optional**, taken in Phase 6.
+   ~120MB (`all-MiniLM-L12-v2`, not the L6 originally costed — see the Phase 6
+   result for why L6 could not gate). It sits in the optional block beside
+   `insightface`; with it absent the scorecard is Phase 5's to the decimal and
+   the suite is green, asserted on every run via
+   `INTELLIGENCE_OS_NO_SEMANTIC=1`.
 2. ~~**Habit timezone**~~ — **answered: local**, taken in Phase 5 on the stated
    recommendation, since "most Tuesdays around 2" is a local-time claim and
    local is the clock the answers already render in. `time.localtime` reads

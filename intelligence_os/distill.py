@@ -321,14 +321,37 @@ class Distiller:
         since = self.mine_window()
         habits = self.mine_habits(since=since)
         relations = self.mine_relations(since=since)
+        embedded = self.embed_new_text()
         pruned = prune_old_keyframes()
         return {
             "changes": len(changes),
             "events": len(events),
             "habits": len(habits),
             "relations": len(relations),
+            "embedded": embedded,
             "keyframes_pruned": pruned,
         }
+
+    def embed_new_text(self) -> int:
+        """Index prose written since the last pass (search plan Phase 6).
+
+        Here rather than in `store.add_observation` on purpose. An embedding is
+        milliseconds of matrix multiply and the observation write path runs per
+        frame, per camera, all day — the one place in this system where that is
+        not free. Batching it into the pass that already exists costs a row
+        being semantically searchable one tick late (60s live, a night in the
+        scheduled configuration) and buys a write path that cannot be slowed
+        down, or taken down, by a model.
+
+        Failure is not an error. No encoder installed means zero rows embedded
+        and a search that answers lexically, which is Phase 2's behaviour and
+        was never wrong — only narrower.
+        """
+        from .semantic import backfill      # deferred: optional dep behind it
+        try:
+            return backfill(self.store)
+        except Exception:
+            return 0
 
 
 def main(argv=None) -> int:

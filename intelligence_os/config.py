@@ -206,6 +206,74 @@ class DistillConfig:
 
 
 @dataclass
+class SemanticConfig:
+    """Meaning-based retrieval (search plan Phase 6).
+
+    Optional in the same sense `insightface` is: with no local embedding model
+    installed the layer produces nothing and search is exactly Phase 2's lexical
+    behaviour. Nothing here downgrades an answer that already worked — semantic
+    hits are FUSED with the lexical ones, never substituted for them.
+    """
+    # The master switch, separate from whether the model is installed. It exists
+    # so a deployment that dislikes what this layer surfaces can turn it off in
+    # config rather than uninstalling a package or rolling back a release.
+    #
+    # The env var is how "does this still work without the dependency?" gets
+    # answered on a machine that HAS the dependency. That question needs a real
+    # answer on every run rather than once, on a laptop, by uninstalling things
+    # — which is a check nobody repeats.
+    enabled: bool = not os.environ.get("INTELLIGENCE_OS_NO_SEMANTIC")
+    # Named, not just loaded: the name is stored beside every vector, so a model
+    # swap is detectable rather than silently mixing two incompatible spaces in
+    # one index.
+    #
+    # L12 rather than the smaller L6, and rather than a stronger retrieval model
+    # like bge-small, because this index has to do something most benchmarks do
+    # not measure: SAY NO. Measured on the eval corpus (docs/search-baseline.md):
+    #
+    #   model      worst true hit   best score for 'dog', which is not there
+    #   L6                  0.276                                      0.248
+    #   L12                 0.375                                      0.233
+    #   bge-small           0.521                                      0.494
+    #
+    # L6 puts a real answer and pure noise 0.03 apart, so no floor separates
+    # them. bge scores everything highly — it is trained to RANK, and a ranker
+    # asked for an absolute yes/no has nothing to give. L12 leaves a gap wide
+    # enough to put a threshold in, for ~120MB instead of ~90MB.
+    model: str = "sentence-transformers/all-MiniLM-L12-v2"
+    # Cosine below this is not a match, and this is the one score in the system
+    # that is ALLOWED to gate. bm25 only ever orders results, because its
+    # magnitude is relative to the corpus and says nothing on its own. Cosine is
+    # absolute and comparable across queries, so without a floor every question
+    # returns the nearest row in the memory whether or not anything answers it —
+    # which is how a semantic layer invents evidence.
+    #
+    # 0.30 sits in the middle of the gap in the table above. It is a property of
+    # the model, not of this corpus: change the model and re-measure, which is
+    # what `model` being a stored column is for.
+    min_similarity: float = 0.30
+    # How many semantically-ranked rows enter the fusion.
+    top_k: int = 200
+    # RRF's rank offset, the constant from the original paper. Deliberately not
+    # tuned: its job is to flatten the gap between rank 1 and rank 2 enough that
+    # neither list can dominate the other off a single confident hit, and a
+    # value fitted to this corpus would stop doing that on someone else's.
+    rrf_k: float = 60.0
+    # Rows about the same subject and predicate closer together than this are one
+    # hit, not several. A settled scene re-described every few seconds otherwise
+    # fills an answer with the same sentence, and the count reads as recurrence.
+    collapse_seconds: float = 120.0
+    # Rows handed to the encoder per call, and vectors held in memory per chunk
+    # while scanning. Both are bounded on purpose: an embedding is 1.5KB and a
+    # year of prose is not something to load in one list.
+    batch_size: int = 128
+    scan_chunk: int = 4096
+    # Keyframes shown per entity. Chosen for time coverage rather than by taking
+    # the first `n` — see `ask._diverse_keyframes`.
+    max_keyframes: int = 4
+
+
+@dataclass
 class VLMConfig:
     # Anthropic model used for BOTH the describer [F] and reasoner [H] roles.
     model: str = "claude-opus-4-8"
@@ -221,6 +289,7 @@ class Config:
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
     distill: DistillConfig = field(default_factory=DistillConfig)
+    semantic: SemanticConfig = field(default_factory=SemanticConfig)
     vlm: VLMConfig = field(default_factory=VLMConfig)
     # Retention: drop raw frames/crops older than this many days (§11).
     raw_retention_days: int = 7
@@ -261,6 +330,11 @@ def apply_app_config(cfg: dict | None = None) -> None:
         CONFIG.raw_retention_days = int(cfg["retention_days"])
     if "face_matching" in cfg:
         CONFIG.identity.enabled = bool(cfg["face_matching"])
+    if "semantic_search" in cfg:
+        # A kill switch that does not need a redeploy. Turning it off leaves the
+        # stored vectors alone, so turning it back on costs nothing — the point
+        # is to stop *reading* them, not to throw the index away.
+        CONFIG.semantic.enabled = bool(cfg["semantic_search"])
     if "object_classes" in cfg:
         # An empty/absent list means "keep the defaults"; an explicit list wins.
         # `person` is always detected and is not part of this list (detect.py adds

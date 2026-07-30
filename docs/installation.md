@@ -30,6 +30,7 @@ First visit prompts you to create a login. There is no default password.
 | `pip install -r requirements.txt` | The full pipeline: motion, detection, tracking, zones, observations, rules, distillation, dashboard. | Pulls torch — several hundred MB |
 | `+ pip install -e ".[identity]"` | Stage C: face re-identification across days and cameras. | +InsightFace, +onnxruntime |
 | `+ pip install -e ".[vlm]"` | Stage F: natural-language scene descriptions, the AI Assistant, rule compilation. | +anthropic, and an API key |
+| `+ pip install -e ".[semantic]"` | Search by meaning: "loitering" finds a recorded "standing around, waiting". | +sentence-transformers, ~120 MB of weights |
 
 The design point is that **the middle row is fully useful on its own**: no cloud
 key, no biometrics, no account anywhere. The optional extras upgrade it; they
@@ -57,6 +58,19 @@ On the first run the pipeline fetches:
 
 There is no progress bar on some of this. It is downloading, not hung. Give it a
 few minutes on a first run and it will never happen again.
+
+The semantic search model (`all-MiniLM-L12-v2`, ~120 MB) downloads the first
+time anything asks for a vector — normally the first distillation pass after you
+install it. It runs entirely on your machine afterwards, with no network and no
+key. To fetch it and index existing memory up front:
+
+```bash
+python -m intelligence_os.semantic          # build the index
+python -m intelligence_os.semantic --query "someone loitering"
+```
+
+If it is missing, search falls back to term matching and says so in the trace.
+Nothing waits on it and nothing fails.
 
 ## Pins you should not casually change
 

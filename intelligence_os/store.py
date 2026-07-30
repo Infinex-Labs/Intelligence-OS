@@ -216,6 +216,31 @@ CREATE TABLE IF NOT EXISTS scene_descriptions (
     text           TEXT NOT NULL    -- flattened prose
 );
 
+-- Search plan Phase 6: the semantic index. One vector per piece of prose, in
+-- the same float32-blob convention `signatures` already uses — there is no
+-- second serialisation format in this system and there should not be.
+--
+-- `model` is a column rather than an assumption because two models produce two
+-- incompatible spaces, and a cosine between them is a number with no meaning.
+-- Recording it makes a model swap a thing that can be detected and re-indexed
+-- instead of a silent collapse in answer quality.
+--
+-- UNIQUE(kind, ref_id, model) is what makes the backfill idempotent: it is a
+-- batch job that will be interrupted, re-run, and run again by the nightly
+-- pass, and without this each run would add another copy of every vector and
+-- quietly weight those rows higher in the scan.
+CREATE TABLE IF NOT EXISTS text_embeddings (
+    embedding_id TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,   -- observation | description
+    ref_id       TEXT NOT NULL,
+    dim          INTEGER NOT NULL,
+    vec          BLOB NOT NULL,   -- float32, L2-normalised
+    model        TEXT NOT NULL,
+    created_at   REAL NOT NULL,
+    UNIQUE(kind, ref_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_txtemb_ref ON text_embeddings(kind, ref_id);
+
 -- Search plan Phase 3: the two shapes every question has. A question is a time
 -- window, optionally narrowed to a place; a profile is one subject over time.
 -- Both composites lead with the column the older single-column indexes covered
@@ -537,6 +562,139 @@ class Store:
             return self.conn.execute(" ".join(q), args).fetchall()
         except sqlite3.OperationalError:
             return []
+
+    # --- the semantic index (search plan Phase 6) ----------------------------
+    #
+    # The lexical index above is a table SQLite maintains; this one is a table we
+    # maintain, and the difference is where the work happens. FTS5 tokenises
+    # inside a trigger, on the writing thread, in microseconds. An embedding
+    # costs milliseconds of matrix multiply, and the write path here runs per
+    # frame, per camera, all day — so vectors are produced by a batch pass
+    # (`semantic.backfill`, called from distillation) rather than on insert.
+    #
+    # What that buys and what it costs: the write path stays exactly as fast as
+    # it was and cannot be taken down by a model that fails to load, and in
+    # exchange a row is lexically searchable immediately but semantically
+    # searchable one distillation tick later. That is the same lag the mined
+    # habits already have, and it is stated in the docs rather than hidden.
+
+    EMBED_OBSERVATION = "observation"
+
+    def add_embeddings(self, kind: str, model: str,
+                       rows: Sequence[tuple[str, "np.ndarray"]]) -> int:
+        """Store `[(ref_id, vector)]`, replacing any vector already held.
+
+        `ON CONFLICT ... DO UPDATE` rather than `INSERT OR IGNORE`, because the
+        one time a ref is re-embedded under the same model name is when the
+        encoder behind that name changed — a stub swapped for the real thing, a
+        library upgrade — and keeping the old vector would leave a row that
+        answers to a space nothing else is in.
+        """
+        payload = [
+            (_uid("emb"), kind, ref_id, int(np.asarray(vec).shape[-1]),
+             self._pack(vec), model, now())
+            for ref_id, vec in rows
+        ]
+        if not payload:
+            return 0
+        with self.tx() as c:
+            c.executemany(
+                "INSERT INTO text_embeddings(embedding_id,kind,ref_id,dim,vec,"
+                "model,created_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(kind,ref_id,model) DO UPDATE SET "
+                "vec=excluded.vec, dim=excluded.dim, created_at=excluded.created_at",
+                payload)
+        return len(payload)
+
+    def embedded_count(self, kind: str, model: str) -> int:
+        """How many vectors this model has here. The cheap gate on the query
+        path: with none, there is nothing for a semantic search to search, and
+        loading an encoder to discover that would cost seconds per question."""
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM text_embeddings WHERE kind=? AND model=?",
+            (kind, model)).fetchone()["c"]
+
+    def embedding_backlog(self, model: str, *, limit: int = 512) -> list[sqlite3.Row]:
+        """Observations that carry prose and have no vector for this model.
+
+        `text IS NOT NULL` is the whole selection rule, and it is what keeps this
+        affordable: only vision-model rows carry prose. A detector's `present` is
+        a structured fact with a structured filter already on it, and embedding
+        the word "present" a million times would index noise at the exact scale
+        where scanning it hurts.
+        """
+        return self.conn.execute(
+            "SELECT observation_id, text FROM observations o "
+            "WHERE o.text IS NOT NULL AND o.text<>'' AND NOT EXISTS ("
+            "  SELECT 1 FROM text_embeddings e WHERE e.kind=? AND e.model=? "
+            "    AND e.ref_id=o.observation_id) "
+            "ORDER BY o.timestamp DESC LIMIT ?",
+            (self.EMBED_OBSERVATION, model, limit)).fetchall()
+
+    def embedded_chunks(self, model: str, *, since: Optional[float] = None,
+                        until: Optional[float] = None,
+                        location_ids: Optional[Sequence[str]] = None,
+                        camera_ids: Optional[Sequence[str]] = None,
+                        entity_ids: Optional[Sequence[str]] = None,
+                        chunk: int = 4096):
+        """Yield `(ref_ids, matrix)` for embedded rows passing the hard filters.
+
+        Streamed rather than returned, so the caller's memory is bounded by the
+        chunk and its top-k instead of by how much prose the memory holds. The
+        exactness is not traded away for that: the caller keeps a running best-k
+        across chunks, which is the same answer a single pass would give.
+
+        The filters are in the SQL for the same reason `search_text` puts them
+        there — a ranked list is CUT at k, so a list drawn from the whole memory
+        and then narrowed to one zone is shorter than one drawn from that zone.
+        The conditions are qualified with `o.` and the vector columns with `e.`,
+        because the two tables are joined here and an unqualified column name in
+        a join is a bug waiting for someone to add a column.
+        """
+        q = ["SELECT e.ref_id AS ref_id, e.vec AS vec "
+             "FROM text_embeddings e "
+             "JOIN observations o ON o.observation_id = e.ref_id "
+             "WHERE e.kind=? AND e.model=?"]
+        args: list = [self.EMBED_OBSERVATION, model]
+        if since is not None:
+            q.append("AND o.timestamp>=?"); args.append(since)
+        if until is not None:
+            q.append("AND o.timestamp<=?"); args.append(until)
+        # Same convention as `_obs_where` and `search_text`: None is no filter,
+        # an empty sequence is a filter nothing satisfies. All three read the
+        # same plan, so all three have to agree on what an empty list means.
+        for col, values in (("location_id", location_ids),
+                            ("camera_id", camera_ids),
+                            ("subject_entity_id", entity_ids)):
+            if values is None:
+                continue
+            if not values:
+                return
+            q.append(f"AND o.{col} IN ({','.join('?' * len(values))})")
+            args.extend(values)
+
+        cur = self.conn.execute(" ".join(q), args)
+        while True:
+            rows = cur.fetchmany(chunk)
+            if not rows:
+                return
+            yield ([r["ref_id"] for r in rows],
+                   np.stack([self._unpack(r["vec"]) for r in rows]))
+
+    def drop_embeddings(self, *, kind: Optional[str] = None,
+                        model: Optional[str] = None) -> int:
+        """Forget vectors. The re-index escape hatch, and the only way to retire
+        a model's space once its name has been reused."""
+        conds, args = [], []
+        if kind is not None:
+            conds.append("kind=?"); args.append(kind)
+        if model is not None:
+            conds.append("model=?"); args.append(model)
+        q = "DELETE FROM text_embeddings"
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        with self.tx() as c:
+            return c.execute(q, args).rowcount
 
     # --- alerts (V4-M4) ------------------------------------------------------
     ALERT_STATUSES = ("new", "acknowledged", "resolved")
@@ -1529,6 +1687,15 @@ class Store:
         with self.tx() as c:
             counts["signatures"] = c.execute(
                 "DELETE FROM signatures WHERE entity_id=?", (entity_id,)).rowcount
+            # Before the rows themselves, because the vectors are found THROUGH
+            # them. An embedding of "holding the gate open" is derived data about
+            # a person, so a privacy removal that left it behind would leave the
+            # sentence searchable by meaning after deleting it by name (§11).
+            counts["embeddings"] = c.execute(
+                "DELETE FROM text_embeddings WHERE kind=? AND ref_id IN ("
+                "  SELECT observation_id FROM observations "
+                "   WHERE subject_entity_id=? OR object_entity_id=?)",
+                (self.EMBED_OBSERVATION, entity_id, entity_id)).rowcount
             counts["observations"] = c.execute(
                 "DELETE FROM observations WHERE subject_entity_id=? OR object_entity_id=?",
                 (entity_id, entity_id)).rowcount

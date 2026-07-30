@@ -23,6 +23,7 @@ That is enforced by construction, not by prompting.
         │  SQL over memory      │   ← every fact comes from here
         │  observations ·       │
         │  habits · snapshots   │
+        │  words + meaning      │
         └───────────┬───────────┘
                     ▼
      arrivals, departures, durations, keyframes, rule events,
@@ -53,6 +54,33 @@ means it happened six times; six sightings under a confirmed habit means it is
 what that subject *does*. Habits are bucketed on the deployment's local clock —
 the same one answers are rendered in — so "most Tuesdays around 2" means two in
 the afternoon where the cameras are.
+
+## Finding the right words, and finding the right meaning
+
+The words in a question go to two indexes at once. One matches **terms**: it
+stems, so "cigarettes" finds "cigarette", and it is exact about it. The other
+matches **meaning**: it finds "standing around, waiting" when you asked about
+loitering, which no amount of stemming ever could — the two share not one
+character sequence.
+
+The two lists are then fused by rank rather than by score, because a term score
+and a meaning score are not on a common scale and never can be. Fusion only ever
+*adds* candidates: a row the term index found cannot be pushed out of an answer
+by a meaning ranker that disagrees with it.
+
+Neither index is allowed to widen the question. The window, the zones, the
+cameras and the people are decided in SQL first, and both indexes only ever rank
+what those already permitted. A question about Tuesday cannot return Wednesday
+because the ranker liked it.
+
+**Every hit says which index found it** — `lexical`, `semantic`, or `both` — and
+that is the point rather than a detail. A row found by meaning alone used
+different words from the ones you typed, so the answer tells you what was
+actually recorded instead of repeating your phrasing back at you.
+
+Meaning-based search needs a local model (~120MB, downloaded once, run entirely
+on your machine — no keys, no network). Without it, search is term-matching
+alone: narrower, never wrong.
 
 Everything in the answer — who arrived, when they left, how long they stayed,
 which rules fired, which keyframes to show — is **aggregated deterministically
@@ -146,9 +174,15 @@ to a stranger's.
   look for, an order, a cap, and one of eight intents. Counting, recurrence,
   co-presence and connections are supported; open-ended comparison ("was it
   busier than last week?") is not.
-- **Paraphrase is still lexical.** Words are stemmed and ranked, so "cigarettes"
-  finds "cigarette". Different vocabulary is not reached: `"loitering"` does not
-  match a stored `"standing around, waiting"`.
-- **Recurrence answers lag by a distillation pass** in one respect only — the
-  counts are live, but the mined habit that corroborates them appears after the
-  next nightly run.
+- **Paraphrase needs the optional model.** With `sentence-transformers`
+  installed, `"loitering"` reaches a stored `"standing around, waiting"`. Without
+  it, matching is term-based only and different vocabulary is not reached.
+  Build the index with `python -m intelligence_os.semantic`.
+- **Meaning cannot read negation.** Asked about an open gate, a meaning match
+  scores `"gate — closed"` about as highly as `"gate — open"`; the words *open*
+  and *closed* are what tell them apart, and that is the term index's job. Both
+  run, which is why both exist.
+- **Recurrence answers, and meaning search, lag by a distillation pass.** The
+  counts are live. The mined habit that corroborates them, and the vector that
+  makes a newly described scene findable by meaning, both appear after the next
+  pass — a minute in the live configuration. Term search is immediate.

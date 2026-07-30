@@ -38,6 +38,20 @@ lap>=0.5
 # insightface>=0.7
 # onnxruntime>=1.17
 #
+# Semantic search (search plan Phase 6) — `pip install sentence-transformers`,
+# then `python -m intelligence_os.semantic` to build the index. ~120MB of
+# weights, downloaded once and run entirely locally: no keys, no network at
+# query time. Without it, search falls back to the lexical index — narrower
+# recall, identical answers, and the suite stays green either way (prove it with
+# INTELLIGENCE_OS_NO_SEMANTIC=1).
+#
+# The upper bounds are not caution, they are the installed torch. transformers
+# 5.x requires torch>=2.4 and ultralytics brings 2.2 here, so an unpinned
+# install resolves to a transformers that imports and then fails at the first
+# model load. Raise both together, after checking `torch.__version__`.
+# sentence-transformers>=3,<4
+# transformers>=4.41,<5
+#
 # VLM scene descriptions (stage F) — `pip install anthropic`, then set
 # ANTHROPIC_API_KEY in intelligence_os/.env
 # anthropic>=0.40

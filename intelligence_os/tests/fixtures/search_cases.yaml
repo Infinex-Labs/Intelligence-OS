@@ -13,6 +13,13 @@
 #   baseline    pass | fail — what today's code does. CI asserts reality matches
 #               this, so a phase that fixes a case turns the suite red until the
 #               baseline is flipped. Deliberate: nothing improves silently either.
+#   baseline_semantic
+#               optional second baseline, used only where a local embedding
+#               model is installed AND the corpus embedded (Phase 6). It exists
+#               because "loitering finds standing around, waiting" is a claim
+#               about a model being on the machine, and the suite has to stay
+#               green with the optional dependency uninstalled. Both baselines
+#               are asserted in both directions, so neither mode can drift.
 #
 # Expectations (all optional; a case passes only if every one present is met)
 #   expect_entities      corpus keys that MUST appear in the results
@@ -115,12 +122,18 @@
 
 # ---------------------------------------------------------------------------
 # G1 — different vocabulary entirely. Needs meaning, not words: Phase 6.
+#
+# These four are the only cases with two baselines. Without a local embedding
+# model they still fail, exactly as they did at Phase 5 — the lexical index has
+# no route to them and never will. Phase 6 did not make the words match; it
+# added a second index that does not care about words.
 # ---------------------------------------------------------------------------
 - id: paraphrase_smoking
   question: "was anyone smoking out back?"
   gap: G1
   fixed_by: 6
   baseline: fail          # "smoking" shares no stem with "having a cigarette"
+  baseline_semantic: pass # Phase 6: cosine over the described scene reaches it
   plan: {start: null, end: null, zone: null, text: "smoking"}
   expect_entities: [dave]
   expect_text: "cigarette"
@@ -130,6 +143,7 @@
   gap: G1
   fixed_by: 6
   baseline: fail          # stored "standing around, waiting"
+  baseline_semantic: pass # Phase 6: no shared characters at all, and it matches
   plan: {start: null, end: null, zone: side_gate, text: "loitering"}
   expect_entities: [nadia]
 
@@ -138,6 +152,7 @@
   gap: G1
   fixed_by: 6
   baseline: fail
+  baseline_semantic: pass # Phase 6: "taking a call" -> "on phone"
   plan: {start: null, end: null, zone: null, text: "taking a call"}
   expect_entities: [priya]
 
@@ -146,6 +161,7 @@
   gap: G1
   fixed_by: 6
   baseline: fail          # stored "bicycle — unlocked, against the fence"
+  baseline_semantic: pass # Phase 6: "bike" -> "bicycle", "unattended" -> "unlocked"
   plan: {start: null, end: null, zone: null, text: "bike left unattended"}
   expect_text: "bicycle"
 

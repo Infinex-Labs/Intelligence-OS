@@ -213,7 +213,30 @@ def build(store: Store, *, scale: int = 0) -> dict:
 
     _distil(store)
     return {"zones": zones, "entities": ids, "people": people, "objects": objects,
-            "anchor": ANCHOR}
+            "anchor": ANCHOR, "semantic": _embed(store)}
+
+
+def _embed(store: Store) -> int:
+    """Build the semantic index, if this machine can (search plan Phase 6).
+
+    Returns how many vectors were written — zero on a box with no local
+    embedding model, which is not a failure. The scorecard reads this to decide
+    which baseline a paraphrase case is held to, because "loitering finds
+    standing around, waiting" is a claim about a model being present, and
+    asserting it on a machine without one would be asserting a fact about
+    somebody else's laptop.
+
+    Only rows carrying prose are embedded, so the `scale` padding above — which
+    has no `text` — contributes nothing here. That is deliberate: the latency
+    rows in docs/search-baseline.md are measured against a memory whose semantic
+    index is the size a real one would be, holding the described scenes rather
+    than a million rows saying `present`.
+    """
+    from intelligence_os import semantic
+    try:
+        return semantic.backfill(store)
+    except Exception:
+        return 0
 
 
 def _distil(store: Store) -> None:
