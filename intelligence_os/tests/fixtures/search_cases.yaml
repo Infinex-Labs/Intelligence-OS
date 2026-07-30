@@ -29,6 +29,21 @@
 #   expect_min_count     minimum aggregate count (recurrence questions)
 #   expect_max_entities  upper bound (limit / negation cases)
 #   forbid_entities      corpus keys that must NOT appear
+#   expect_relaxed_by    Phase 7 — the ladder rung that must have produced this
+#                        answer (drop_zone | widen_window | drop_entity_label |
+#                        text_only). Scored rather than merely unit-tested: an
+#                        answer to a loosened question that does not say it was
+#                        loosened is not a better answer, it is a wrong one.
+#   expect_relaxation_tried
+#                        Phase 7 — the ladder must have RUN and recorded its
+#                        steps. Used on the true negative, where the point is
+#                        that the empty result is now a reported empty.
+#
+# Capability markers
+#   requires_relaxation  Phase 7 — this case only passes with the ladder on, so
+#                        with INTELLIGENCE_OS_NO_RELAX=1 it is held to failing
+#                        instead of turning the gate red. The switch has to be
+#                        runnable or nobody knows what off does.
 
 # ---------------------------------------------------------------------------
 # Regression guards — these work today and must never stop working.
@@ -340,3 +355,81 @@
   baseline: pass
   plan: {start: null, end: null, zone: null, predicate_contains: "dog"}
   expect_empty: true
+
+# ---------------------------------------------------------------------------
+# The relaxation ladder (search plan Phase 7, gap G4).
+#
+# Every case here returns NOTHING as asked. Before Phase 7 that was the final
+# answer and was indistinguishable from "it never happened" — which is the
+# failure this whole plan is named after. One rung each, so a rung that stops
+# working names itself rather than hiding behind the one after it.
+#
+# `expect_relaxed_by` is as much of the expectation as the entities are: an
+# answer to a loosened question that does not SAY it was loosened is a wrong
+# answer confidently given, so the disclosure is scored, not just unit-tested.
+# ---------------------------------------------------------------------------
+- id: relax_zone_dave_elsewhere
+  question: "was Dave at the side gate?"
+  requires_relaxation: true
+  gap: G4
+  fixed_by: 7
+  baseline: pass          # Phase 7: he was at the loading bay; empty used to be final
+  plan: {start: null, end: null, zone: side_gate, entity_label: dave}
+  expect_entities: [dave]
+  expect_relaxed_by: drop_zone
+
+- id: relax_window_just_missed
+  question: "was anyone at the loading bay earlier that morning?"
+  requires_relaxation: true
+  gap: G4
+  fixed_by: 7
+  # The near-miss the ladder exists for: the window stops 5 minutes before Dave
+  # walks in. Note the zone rung is tried FIRST and finds nothing — there was
+  # nobody anywhere in that window — so this also proves the ladder keeps
+  # climbing past a rung that fails rather than giving up on it.
+  baseline: pass
+  plan: {start: -6.5d, end: -6.005d, zone: loading_bay}
+  expect_entities: [dave]
+  expect_relaxed_by: widen_window
+
+- id: relax_label_wrong_person
+  question: "was Priya the one having a cigarette?"
+  requires_relaxation: true
+  gap: G4
+  fixed_by: 7
+  # She was not, and the honest answer names who was. This is the rung that
+  # changes who the answer is ABOUT, which is exactly why the disclosure is
+  # part of the expectation.
+  baseline: pass
+  plan: {start: null, end: null, entity_label: priya, text: "cigarette"}
+  expect_entities: [dave]
+  forbid_entities: [priya]
+  expect_relaxed_by: drop_entity_label
+
+- id: relax_text_only_wrong_camera
+  question: "anyone hanging around doing nothing on the dock camera?"
+  requires_relaxation: true
+  gap: G4
+  fixed_by: 7
+  # The last rung: drop every place and person filter, rank on meaning alone.
+  # Nadia is on the yard camera and the memory calls it "standing around,
+  # waiting", so this needs BOTH the ladder and Phase 6's index — which is why
+  # it carries two baselines. Without a local model it stays a true empty.
+  baseline: fail
+  baseline_semantic: pass
+  plan: {start: null, end: null, cameras: [cam_dock], text: "hanging around doing nothing"}
+  expect_entities: [nadia]
+  expect_relaxed_by: text_only
+
+- id: negative_ladder_exhausted
+  question: "did Dave bring a dog to the loading bay that morning?"
+  requires_relaxation: true
+  gap: none
+  fixed_by: 0
+  # The ladder's own true negative, and the sharpest one: every rung applies,
+  # all three are climbed, and the answer is still nothing. It is what stops
+  # "relax until something comes back" from being the implementation.
+  baseline: pass
+  plan: {start: -6.5d, end: -6.005d, zone: loading_bay, entity_label: dave, text: "dog"}
+  expect_empty: true
+  expect_relaxation_tried: true

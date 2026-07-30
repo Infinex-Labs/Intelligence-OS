@@ -527,7 +527,7 @@ def _fuse(*ranked_lists: tuple[str, list[str]]) -> tuple[dict, dict]:
 
 
 def _retrieve(store: Store, text_q: str, pred_q: str, *, plan: dict, loc_ids,
-              cam_ids, entity_ids) -> tuple[dict, dict, dict]:
+              cam_ids, entity_ids, lexical: bool = True) -> tuple[dict, dict, dict]:
     """The ranked candidate ids for a word question, fused.
 
     Returns (scores, reasons, summary). The summary goes into the trace, and it
@@ -543,18 +543,26 @@ def _retrieve(store: Store, text_q: str, pred_q: str, *, plan: dict, loc_ids,
     exact-substring promise about an identifier. Handing an identifier to a
     meaning ranker asks it which predicates FEEL like 'rule_fired', which is not
     a question with an answer.
+
+    `lexical=False` is Phase 7's last rung, and only that. The term index has
+    already been asked this question under no filter at all and had nothing to
+    say, so the only thing left that could answer is different vocabulary —
+    which is the one thing the term index cannot supply. Turning it off is not a
+    ranking preference, it is the admission that it has been exhausted.
     """
-    lexical = [r["observation_id"] for r in store.search_text(
-        text_q or pred_q, since=plan["start"], until=plan["end"],
-        location_ids=loc_ids, camera_ids=cam_ids, entity_ids=entity_ids)]
+    lex_ids: list[str] = []
+    if lexical:
+        lex_ids = [r["observation_id"] for r in store.search_text(
+            text_q or pred_q, since=plan["start"], until=plan["end"],
+            location_ids=loc_ids, camera_ids=cam_ids, entity_ids=entity_ids)]
     meaning: list[str] = []
     if text_q:
         meaning = [oid for oid, _score in semantic.search(
             store, text_q, since=plan["start"], until=plan["end"],
             location_ids=loc_ids, camera_ids=cam_ids, entity_ids=entity_ids)]
-    scores, reasons = _fuse(("lexical", lexical), ("semantic", meaning))
+    scores, reasons = _fuse(("lexical", lex_ids), ("semantic", meaning))
     return scores, reasons, {
-        "lexical": len(lexical),
+        "lexical": len(lex_ids) if lexical else None,
         "semantic": len(meaning),
         "fused": len(scores),
         # Read off the index rather than off the result, so an empty answer can
@@ -897,10 +905,15 @@ def _entities_from_evidence(evidence: dict, loc_names: dict,
     return out
 
 
-def execute(store: Store, query: dict) -> dict:
-    """Deterministic aggregation over observation rows. Every claim in the output
-    is a row (or an aggregate of rows) the caller can inspect."""
-    plan = normalize_plan(query)
+def _answer(store: Store, query: dict, plan: dict, *,
+            semantic_only: bool = False) -> dict:
+    """One pass: a normalised plan in, aggregated evidence out.
+
+    Split out of `execute()` in Phase 7 so the relaxation ladder has something to
+    call more than once. The plan arrives already normalised because the ladder
+    edits it — `execute()` normalises, the rungs derive from that, and this
+    function is the only thing that ever runs one.
+    """
     start, end = plan["start"], plan["end"]
     pred_q, text_q = plan["predicate_contains"], plan["text"]
 
@@ -959,7 +972,7 @@ def execute(store: Store, query: dict) -> dict:
     if text_q or pred_q:
         scores, reasons, retrieval = _retrieve(
             store, text_q, pred_q, plan=plan, loc_ids=loc_ids, cam_ids=cam_ids,
-            entity_ids=subjects.ids)
+            entity_ids=subjects.ids, lexical=not semantic_only)
 
     # Phase 3: the window, the zone and the words are all decided by SQLite now.
     # This used to read the whole table and drop rows in a Python loop, which
@@ -1155,6 +1168,209 @@ def execute(store: Store, query: dict) -> dict:
     return result
 
 
+# --- reflection: the relaxation ladder (search plan Phase 7) -----------------
+#
+# Everything above answers the question as asked. This answers the case where
+# that produced nothing, which until now was final — and a final "nothing" is
+# the one answer this system cannot distinguish for the reader between "memory
+# does not contain it" and "the question missed it by an hour".
+#
+# It is a POLICY, not a second model call: a fixed ladder of single-constraint
+# relaxations, tried in order, stopping at the first result. That keeps it free,
+# deterministic, and testable — a reflection step that costs an LLM call is one
+# nobody can assert about.
+#
+# The safety of the whole thing rests on three properties, and each one is a
+# line of code rather than a hope:
+#
+#   1. It runs ONLY on an empty result. A question that was answered never
+#      reaches here, so no existing answer can change.
+#   2. A rung is applicable only if the constraint it drops RESOLVED to
+#      something memory knows. "Was Mallory here?" names nobody, and dropping a
+#      name that matched nobody does not widen the search for Mallory — it
+#      abandons it and answers about a stranger. Same for a zone that is not a
+#      zone. This is what makes the true-negative cases hold by construction
+#      instead of by being listed somewhere.
+#   3. Nothing negative is ever relaxed. Exclusions, `entity_type` and
+#      `min_confidence` survive every rung. Widening may add candidates; it may
+#      never overrule what the question ruled out.
+#
+# And the window rung is capped in absolute time, not just multiplicatively.
+# "A bit either side" has to mean a bit: x4 of a six-hour question is a day,
+# which is a fuzz, while x4 of a six-week question is half a year, which is a
+# different question wearing the same words.
+
+
+def _is_dead_end(result: dict) -> bool:
+    """Nothing to show. Checked across all three answer shapes, because Phase 5's
+    aggregates can carry an answer the entity list does not."""
+    return not (result.get("entities") or result.get("co_presence")
+                or result.get("relations"))
+
+
+def _widen(plan: dict) -> Optional[dict]:
+    """The window, padded on both sides. None when there is no window to pad."""
+    cfg = CONFIG.reflect
+    start, end = plan["start"], plan["end"]
+    if start is None and end is None:
+        return None                      # already unbounded; nothing to loosen
+    if start is not None and end is not None:
+        span = max(0.0, end - start)
+        pad = min(cfg.widen_factor * span, cfg.widen_cap_s) if span else cfg.widen_cap_s
+    else:
+        # Bounded on one side only. There is no span to scale, so the cap is the
+        # whole answer — which is the same amount of slack the two-sided case is
+        # allowed at most anyway.
+        pad = cfg.widen_cap_s
+    if pad <= 0:
+        return None
+    return {**plan,
+            "start": None if start is None else start - pad,
+            "end": None if end is None else end + pad}
+
+
+def _resolves_to_a_subject(store: Store, plan: dict, loc_names: dict) -> bool:
+    """Whether the plan's labels name anybody memory has heard of.
+
+    Costs one walk of the entity table, on a dead end only. `ids is None` means
+    the set was too large to push into SQL, which is emphatically a resolution —
+    it is the too-many case, not the none case.
+    """
+    subjects = _SubjectFilter(store, plan, loc_names)
+    return subjects.ids is None or bool(subjects.ids)
+
+
+def _rungs(store: Store, plan: dict, loc_names: dict) -> list[dict]:
+    """The relaxations worth trying for this plan, in order, capped.
+
+    Each rung relaxes exactly one thing, and each derives from the ORIGINAL
+    plan rather than from the rung before it — this is a ladder of alternatives,
+    not a slide. The zone rung keeps the window, and the window rung keeps the
+    zone, deliberately: "the bay, an hour later" and "anywhere, that hour" are
+    different questions, and the answer should come from whichever one memory
+    can actually answer, not from the union of everything given up so far.
+
+    **Order is by how much of the question a rung gives up**, least first, and
+    that is a deviation from the plan's table (which tried the zone first). It
+    was not a preference; the scaled eval measured it. On a 100k-row memory,
+    "was anyone at the loading bay that morning?" had its zone dropped, matched
+    a row in a completely different zone inside the same window, and stopped —
+    so the window rung, which would have found the person actually standing in
+    the loading bay twenty minutes later, never ran. Stop-at-first-hit means the
+    ORDER decides the answer, and the first rung that succeeds should be the one
+    that abandoned the least.
+
+    By that measure widening a window is the gentlest thing on this list: every
+    other constraint survives it and only a boundary moves. Dropping the zone
+    abandons a dimension. Dropping the name changes who the answer is about.
+    Rung 4 abandons all of them at once.
+    """
+    out: list[dict] = []
+
+    # 1. The clock. The commonest near-miss by far — "after six" and a sighting
+    #    at 17:52 — and the only rung where the relaxed question is still
+    #    recognisably the one that was asked.
+    widened = _widen(plan)
+    if widened is not None:
+        out.append({
+            "step": "widen_window",
+            "loosened": _window_phrase(plan, widened),
+            "plan": widened,
+        })
+
+    # 2. The place. Only when it is a place: a name matching no zone already
+    #    means "nowhere", and `_zone_ids` returns an empty filter to say so.
+    #    Dropping that is not widening to nearby, it is widening to everywhere.
+    if plan["zones"] and _zone_ids(plan["zones"], loc_names):
+        out.append({
+            "step": "drop_zone",
+            "loosened": f"zone filter ({', '.join(plan['zones'])} -> anywhere)",
+            "plan": {**plan, "zones": []},
+        })
+
+    # 3. The name. Last of the three because it is the one that changes who the
+    #    answer is about, and only when the label names a real subject — the
+    #    case this is for is a planner that picked the wrong one off the list,
+    #    not a person who was never here.
+    if plan["entity_labels"] and _resolves_to_a_subject(store, plan, loc_names):
+        out.append({
+            "step": "drop_entity_label",
+            "loosened": f"subject filter ({', '.join(plan['entity_labels'])} -> anyone)",
+            "plan": {**plan, "entity_labels": []},
+        })
+
+    # 4. Everything structural at once, ranked by meaning alone, inside the
+    #    window that was asked for. Reached only when fewer than `max_steps` of
+    #    the above applied, which is the right time for it: it is the most
+    #    aggressive rung and the only one whose safety comes from a SCORE rather
+    #    than from a resolution. The similarity floor is what stops it returning
+    #    the nearest sentence in memory to a thing that was never recorded, and
+    #    it is why `negative_nothing_perceived` survives the full ladder.
+    if plan["text"] and (plan["zones"] or plan["cameras"] or plan["entity_labels"]):
+        out.append({
+            "step": "text_only",
+            "loosened": "every place and person filter, ranking on meaning alone "
+                        "inside the window asked for",
+            "plan": {**plan, "zones": [], "cameras": [], "entity_labels": [],
+                     "predicate_contains": ""},
+            "semantic_only": True,
+        })
+
+    return out[:max(0, int(CONFIG.reflect.max_steps))]
+
+
+def _window_phrase(plan: dict, widened: dict) -> str:
+    """Human-readable description of how far the clock was loosened."""
+    for key in ("start", "end"):
+        if plan[key] is not None:
+            pad = abs(widened[key] - plan[key])
+            break
+    else:
+        pad = 0.0
+    if pad >= 3600:
+        amount = f"{pad / 3600:.3g}h"
+    else:
+        amount = f"{pad / 60:.3g}min"
+    return f"time window (widened by {amount} either side)"
+
+
+def execute(store: Store, query: dict) -> dict:
+    """Deterministic aggregation over observation rows. Every claim in the output
+    is a row (or an aggregate of rows) the caller can inspect.
+
+    Phase 7 wrapped this around `_answer`: the question as asked is run first and
+    returned untouched whenever it found anything, so the ladder below is only
+    ever reached by a result that was going to be a bare "nothing".
+    """
+    plan = normalize_plan(query)
+    result = _answer(store, query, plan)
+    if not CONFIG.reflect.enabled or not _is_dead_end(result):
+        return result
+
+    loc_names = {r["location_id"]: r["name"] for r in store.locations()}
+    steps: list[dict] = []
+    for rung in _rungs(store, plan, loc_names):
+        got = _answer(store, query, rung["plan"],
+                      semantic_only=rung.get("semantic_only", False))
+        steps.append({"step": rung["step"], "loosened": rung["loosened"],
+                      "found": len(got.get("entities") or [])})
+        if _is_dead_end(got):
+            continue
+        # `plan` on the returned result is the RELAXED one and `query` is still
+        # what was asked, which is exactly what a trace should show: the question
+        # and the query that actually ran, visibly not the same thing.
+        got["relaxation"] = {"attempted": steps, "answered_by": rung["step"],
+                             "loosened": rung["loosened"]}
+        return got
+
+    # Still nothing — and that is now a *reported* nothing rather than a silent
+    # one. The list of what was tried is the difference between "memory does not
+    # contain this" and "we only looked in one place".
+    result["relaxation"] = {"attempted": steps, "answered_by": None,
+                            "loosened": None}
+    return result
+
+
 def _kf(source_ref: Optional[str]) -> Optional[str]:
     """Keyframe URL for a source_ref. A pure transform on purpose: whether the
     file is still on disk is a serving concern (web.py drops pruned ones), and
@@ -1172,7 +1388,13 @@ NARRATE_SYSTEM = (
     "A row marked matched_by 'semantic' was found by MEANING, not by the words asked: "
     "say what was actually recorded ('the closest thing recorded is \"standing around, "
     "waiting\"') rather than repeating the question's wording back as if the memory used "
-    "it. Every fact "
+    "it. "
+    "If a 'relaxed_query' key is present, NOTHING matched the question as asked, and what "
+    "you are looking at answers a LOOSENED version of it. Say so in your FIRST sentence and "
+    "name what was loosened ('nothing in the loading bay after six — widening to all zones, "
+    "two sightings at the side gate'). Never present a loosened answer as though it were the "
+    "answer to what was asked. If it says nothing was found even after loosening, say plainly "
+    "that nothing matched and mention what else was tried. Every fact "
     "you state — every name, time, count, place, event — must come from THIS question's "
     "JSON, never from memory of earlier turns and never invented; prior turns are for "
     "tone and pronouns only. Never soften or inflate the numbers. If the summary is "
@@ -1212,6 +1434,21 @@ def _facts(result: dict) -> dict:
         # Named separately from `total_observations` because the question asked
         # for it. Same number, but the model is being told which one is the reply.
         facts["count"] = result["count"]
+    # Phase 7. Disclosure is not optional decoration here — it is the thing that
+    # makes relaxing a constraint honest rather than a quiet substitution. The
+    # projection carries the facts; NARRATE_SYSTEM carries the obligation to
+    # state them, so the prose cannot present a loosened answer as the answer.
+    rx = result.get("relaxation")
+    if rx and rx.get("answered_by"):
+        facts["relaxed_query"] = {
+            "as_asked": "nothing matched",
+            "loosened_instead": rx["loosened"],
+        }
+    elif rx and rx.get("attempted"):
+        facts["relaxed_query"] = {
+            "as_asked": "nothing matched",
+            "also_tried_and_still_nothing": [s["loosened"] for s in rx["attempted"]],
+        }
     # Phase 5's aggregates, projected the same way: pre-formatted, no ids. The
     # narrator is given the pattern already computed rather than the rows to
     # count, for the same reason it is given formatted times — it phrases these,
@@ -1298,6 +1535,17 @@ def render_text(result: dict) -> str:
     lines = []
     if result.get("answer"):
         lines += [result["answer"], ""]
+    rx = result.get("relaxation")
+    if rx:
+        if rx["answered_by"]:
+            lines.append(f"relaxed: nothing as asked — loosened {rx['loosened']}")
+        elif rx["attempted"]:
+            lines.append("relaxed: nothing as asked, and nothing after loosening either")
+        else:
+            lines.append("relaxed: nothing as asked, and nothing here could be loosened")
+        for s in rx["attempted"]:
+            lines.append(f"  tried {s['step']}: {s['loosened']}"
+                         f"  -> {s['found']} entit(y/ies)")
     if result.get("count") is not None:
         lines.append(f"count: {result['count']} sighting(s).")
     for r in result.get("recurrence") or []:

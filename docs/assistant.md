@@ -26,6 +26,13 @@ That is enforced by construction, not by prompting.
         │  words + meaning      │
         └───────────┬───────────┘
                     ▼
+                    │
+                    ▼  nothing found?
+        ┌───────────────────────┐
+        │  loosen ONE thing,    │   ← and say which
+        │  retry, up to 3x      │
+        └───────────┬───────────┘
+                    ▼
      arrivals, departures, durations, keyframes, rule events,
      recurrence, who-was-there-too, distilled connections
 ```
@@ -81,6 +88,37 @@ actually recorded instead of repeating your phrasing back at you.
 Meaning-based search needs a local model (~120MB, downloaded once, run entirely
 on your machine — no keys, no network). Without it, search is term-matching
 alone: narrower, never wrong.
+
+## When nothing matches, it says where else it looked
+
+"I could not find it" and "it did not happen" used to be the same reply, which
+is the worst thing this system can do, because the difference is invisible.
+
+So when a question returns nothing, the assistant loosens **one** constraint,
+tries again, and stops at the first thing it finds. It widens the time window
+first — the commonest near miss is asking about "after six" when the sighting
+was at 17:52 — then drops the place, then the person, then falls back to
+searching by meaning alone. At most three attempts.
+
+Three things it will not do, and they are what make widening safe rather than
+convenient:
+
+- **It only widens a question that found nothing.** A question that got an
+  answer is untouched, so nothing that worked can start returning something
+  else.
+- **It only drops a filter that named something real.** Ask about someone who
+  has never been seen here and the name is *not* dropped — abandoning it would
+  answer about a stranger, which is not a wider answer to your question, it is a
+  confident answer to a different one. The same goes for a place that isn't a
+  place.
+- **It never overrides an exclusion.** "Anyone except the courier" comes back
+  without the courier, however far it has to widen.
+
+**A widened answer always says it was widened** — in the prose, in the trace,
+and in the CLI output. An answer that quietly answered an easier question would
+be worse than the empty result it replaced. And when the widening finds nothing
+either, it tells you what it tried, which is the difference between *"nothing
+found"* and *"nothing found, and here is everywhere else I looked"*.
 
 Everything in the answer — who arrived, when they left, how long they stayed,
 which rules fired, which keyframes to show — is **aggregated deterministically
@@ -169,6 +207,11 @@ to a stranger's.
 - **It can only answer from what was observed.** If no zone was drawn, nothing
   has a location; if identity is off, people are not the same person across
   days. The assistant will tell you it saw nothing rather than guess.
+- **A widened answer is a weaker claim, and reads like one.** It answers a
+  question adjacent to yours and says which one. If you would rather a miss
+  stayed a miss, set `widen_empty_searches: false` in `config.yaml` — the
+  answers you already get do not change, because widening only ever runs on a
+  question that found nothing.
 - **Question shapes are limited** to what the query tool can express: a window,
   places, cameras, people (or people to leave out), a kind of thing, words to
   look for, an order, a cap, and one of eight intents. Counting, recurrence,

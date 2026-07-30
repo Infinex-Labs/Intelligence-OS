@@ -274,6 +274,50 @@ class SemanticConfig:
 
 
 @dataclass
+class ReflectionConfig:
+    """The relaxation ladder (search plan Phase 7).
+
+    Empty used to be final, which made "I could not find it" and "it did not
+    happen" the same reply — the worst failure this system has, because it is
+    invisible. When a question comes back with nothing, the ladder loosens ONE
+    constraint at a time, retries, and stops at the first result.
+
+    Three rules keep it from relaxing its way into inventing an answer:
+
+      it only ever runs on an EMPTY result, so a question that was answered is
+      bit-for-bit unchanged;
+
+      it only loosens constraints that RESOLVED to something memory knows — a
+      zone that exists, a label that names a real subject. Dropping a filter
+      that named nothing is not widening the search, it is abandoning it, and
+      that is how "was Mallory here?" would come back with a photograph of
+      somebody else;
+
+      it never touches an exclusion. "Anyone except the courier" is a
+      constraint on the answer, and widening is allowed to add candidates,
+      never to overrule what was ruled out.
+
+    Everything it does is recorded in the trace and disclosed in the prose.
+    """
+    # As with the semantic layer: an env kill switch, so "does this still
+    # behave like Phase 6?" is answered on every run rather than by reasoning
+    # about it. With this off, a dead end is a dead end again.
+    enabled: bool = not os.environ.get("INTELLIGENCE_OS_NO_RELAX")
+    # At most this many rungs are tried. A ladder with no top is a search that
+    # eventually returns the whole table and calls it an answer.
+    max_steps: int = 3
+    # Window widening, per side. The multiplier is what makes "a bit either
+    # side" mean something for a six-hour question; the cap is what stops it
+    # meaning something absurd for a six-WEEK one. Without the cap, a question
+    # about last month widens by a fortnight and answers about a different
+    # month — and "was anyone there next week?" quietly reaches back into
+    # everything ever recorded. It is the cap, not the multiplier, that makes
+    # the true-negative guard hold by construction.
+    widen_factor: float = 1.5
+    widen_cap_s: float = 6 * 3600.0
+
+
+@dataclass
 class VLMConfig:
     # Anthropic model used for BOTH the describer [F] and reasoner [H] roles.
     model: str = "claude-opus-4-8"
@@ -290,6 +334,7 @@ class Config:
     detect: DetectConfig = field(default_factory=DetectConfig)
     distill: DistillConfig = field(default_factory=DistillConfig)
     semantic: SemanticConfig = field(default_factory=SemanticConfig)
+    reflect: ReflectionConfig = field(default_factory=ReflectionConfig)
     vlm: VLMConfig = field(default_factory=VLMConfig)
     # Retention: drop raw frames/crops older than this many days (§11).
     raw_retention_days: int = 7
@@ -335,6 +380,12 @@ def apply_app_config(cfg: dict | None = None) -> None:
         # stored vectors alone, so turning it back on costs nothing — the point
         # is to stop *reading* them, not to throw the index away.
         CONFIG.semantic.enabled = bool(cfg["semantic_search"])
+    if "widen_empty_searches" in cfg:
+        # Off means a question that matches nothing answers "nothing", full
+        # stop. Some deployments want exactly that: a loosened answer is a
+        # correct answer to a question nobody asked, and disclosure is only
+        # worth something if somebody reads it.
+        CONFIG.reflect.enabled = bool(cfg["widen_empty_searches"])
     if "object_classes" in cfg:
         # An empty/absent list means "keep the defaults"; an explicit list wins.
         # `person` is always detected and is not part of this list (detect.py adds

@@ -1,6 +1,6 @@
 # Search & Retrieval Architecture Plan
 
-**Status:** Phases 0–6 landed; 7–8 still proposal. See
+**Status:** Phases 0–7 landed; 8 still proposal (and recommended deferred). See
 [`search-baseline.md`](search-baseline.md) for the scored trajectory.
 **Scope:** the query/retrieval layers of Intelligence OS — `ask.py`, the search
 surface of `store.py`, the memory-write path in `run.py`/`vlm.py`, and the
@@ -106,7 +106,7 @@ the answer.
 | Indexing | discards half, indexes none | **Phase 1–2** — persist all, FTS5 index |
 | Retrieval (coarse) | absent | **Phase 2 + 6** — lexical + semantic recall |
 | Selection (fine) | absent | **Phase 6** — fusion, rerank, dedup, diverse keyframes |
-| Reflection | absent | **Phase 7** — deterministic relaxation ladder |
+| Reflection | absent | **Phase 7** ✅ — deterministic relaxation ladder |
 | Reconstruction | ✅ present, and stronger than theirs | keep unchanged |
 
 ### 2.1 Explicitly NOT borrowed
@@ -882,7 +882,7 @@ the schema and unused — nothing reads whole-report vectors yet.
 
 ---
 
-### Phase 7 — Reflection: never let a dead end be the answer
+### Phase 7 — Reflection: never let a dead end be the answer ✅ DONE
 
 **Why.** G4. Today, empty is final, and *"I could not find it"* is
 indistinguishable from *"it did not happen"* — the worst failure mode, because it
@@ -918,6 +918,67 @@ genuinely absent event still returns empty after the full ladder.
 
 **Done when.** No Phase 0 case returns a bare empty result where an answer
 exists, and a true-negative case still returns empty **with** the ladder recorded.
+
+**Result.** 37/37 cases, 0 silent failures. Five cases were added for this phase
+— four that return nothing as asked, and one that must return nothing after the
+full ladder. Measured on the same 37 with the ladder off: 32/37, 4 silent
+failures. Scorecard: [`search-baseline.md`](search-baseline.md).
+
+Six decisions worth recording, five of them deviations:
+
+1. **The rung order is reversed from the table above**, and the eval is why.
+   Tried zone-first at 100k rows, and *"was anyone at the loading bay that
+   morning?"* dropped its zone, matched a row in a different zone inside the
+   same window, and stopped — so the window rung, which would have found the
+   person actually in the loading bay twenty minutes later, never ran.
+   Stop-at-first-hit means the order decides the answer, so the rungs now run
+   **least-destructive first**: widen the window (only a boundary moves) → drop
+   the zone → drop the subject → drop everything structural. Both orderings
+   score 37/37 on the *unscaled* corpus, which is what makes this the kind of
+   defect that ships.
+
+2. **A rung is applicable only if the constraint it drops resolved to something
+   memory knows.** Not in the spec, and it is what makes the true negatives hold
+   by construction instead of by enumeration. *"Was Mallory here?"* names
+   nobody; dropping a name that matched nobody does not widen the search for
+   Mallory, it abandons it and answers about a stranger. Same for a zone that is
+   not a zone.
+
+3. **The window widen is capped in absolute time** (×1.5 per side, max 6h), not
+   just multiplicatively. ×4 of a six-hour question is a fuzz; ×4 of a six-week
+   question is a different question. Without the cap, `negative_empty_window`
+   reaches back through the entire memory. The cap is the guard, not the
+   multiplier.
+
+4. **Exclusions, `entity_type` and `min_confidence` are never relaxed.** Also
+   not in the spec. Widening may add candidates; it may never overrule what the
+   question ruled out, or *"anyone except the courier"* comes back with the
+   courier.
+
+5. **The ladder runs on `execute()`, not `ask()`.** The spec said `ask()`, but
+   the scored suite calls `execute()` directly — putting it in `ask()` would
+   have made the phase's own "done when" criterion unmeasurable by the harness
+   that measures every other phase.
+
+6. **`INTELLIGENCE_OS_NO_RELAX=1`** exists for the same reason
+   `INTELLIGENCE_OS_NO_SEMANTIC` does, and the four combinations of the two are
+   all green in CI. The Phase 7 cases carry a `requires_relaxation` marker and
+   are held to failing when it is off, so the switch is runnable rather than
+   theoretical.
+
+**What Phase 4's hard-filter invariant now means.** Unchanged, and worth stating
+precisely because this phase looks like it crosses it: *the ranker* still cannot
+cross a hard filter — no row enters an answer because a bm25 or cosine score
+liked it, and that is asserted directly against a single pass. The ladder crosses
+a zone as a **policy**, applied to the whole query, only after the question as
+asked returned nothing, and reported. Those are different acts.
+`tests/test_search_query_form.py` holds both assertions side by side.
+
+**Not done here.** No camera-only rung (a camera is a named device, rarely a
+near-miss). No re-planning — reflection stays a policy, so it costs nothing and
+can be asserted. The ladder never widens an answer it considers *too small*;
+deciding a non-empty result is insufficient is a judgement about what the asker
+wanted, and this responds only to the unambiguous case.
 
 ---
 
@@ -958,7 +1019,8 @@ easy to take.
 
 Recommended: **0 → 1 → 2 → 3** as foundations (measurable, no deps, no behaviour
 change you rely on), then **4 → 5** for the largest visible win, then **6 → 7**.
-0–6 are done; **7 is next**, and it needs nothing installed.
+**0–7 are done.** Phase 7 needed nothing installed, as costed. Only Phase 8
+remains, and the recommendation on it is still to defer.
 
 ---
 
@@ -1016,7 +1078,9 @@ now. Tracked in `docs/search-baseline.md`, one row per phase:
   nothing, better search finds nothing. This plan fixes retrieval, not sight.
 - **Paraphrase improves, it is not solved.** Ranked semantic search is a large
   improvement, not a guarantee. Phase 7 is what keeps the residual misses
-  *honest* rather than silent.
+  *honest* rather than silent — an unanswerable question now comes back saying
+  where else it looked, which does not answer it but does distinguish it from
+  a question whose answer is genuinely "that never happened".
 - **Semantic search can surface plausible-but-wrong rows.** Bounded by hard
   filters, a similarity floor, and visible `match_reason` — not eliminated.
 
@@ -1036,4 +1100,7 @@ now. Tracked in `docs/search-baseline.md`, one row per phase:
    `TZ`. One definition in `distill.py`; `digest.py` and `ask.py` call it.
 3. **Row-volume ceiling** — cap observations emitted per VLM description? Suggest
    a configurable cap, default generous. *Phase 1 tuning, not a blocker.*
-4. **Phase 8** — defer pending the scorecard. Recommend yes, defer.
+4. **Phase 8** — defer pending the scorecard. Recommend yes, defer. Nothing in
+   the Phase 7 results changes this: no case in the suite fails for want of an
+   appearance query, and the ladder's reported empties are where such a gap
+   would show up first if one existed.

@@ -13,6 +13,15 @@ never overwrite, so the trajectory stays in version control.
 | **4 — a wider query form** | **23/32** | **5/32** | 62.3% | **73.7%** | 0.697 | 100.0% | 20.43 | 460.08 |
 | **5 — habits and co-presence** | **28/32** | **4/32** | **76.7%** | **85.0%** | **0.850** | 100.0% | 0.77 | 78.49 |
 | **6 — semantic retrieval + fusion** | **32/32** | **0/32** | **91.7%** | **100.0%** | **1.000** | 100.0% | 70.66 | 328.13 |
+| **7 — relaxation ladder** | **37/37** | **0/37** | 88.9% | **100.0%** | 0.979 | 100.0% | 67.76 | 296.00 |
+
+**Read the Phase 7 row against a longer case list, not the row above it.** Phase
+7 added five cases — four questions that return nothing as asked and one that
+must return nothing after the full ladder — so 32/32 and 37/37 are not the same
+denominator, and recall@1 fell from 91.7% to 88.9% because the five new cases are
+by construction the hardest in the suite. The comparison that *is* like for like
+is the same 37 cases with the ladder switched off: **32/37, 4 silent failures,
+72.2% / 83.3% / 0.812**. That is the number Phase 7 moved.
 
 **The Phase 6 row requires the optional embedding model.** Without it the same
 code scores exactly Phase 5's row — 28/32, 4 silent failures, 0.767 / 0.850 /
@@ -468,6 +477,137 @@ for the lexical index: bm25 on the word *open* does tell those two apart. The
 answer carries `match_reason` on every hit so a reader can see which index
 believed what.
 
+## What Phase 7 moved
+
+Every phase before this one made the engine find more. This one is about what it
+does when it finds nothing — which until now was to say so and stop, in a way
+indistinguishable from *"it did not happen"*.
+
+### Four modes, and the one that matters
+
+Two optional behaviours now exist, so there are four ways to run this. All four
+are asserted by CI, and all four are green, because a switch whose off position
+turns the gate red is a switch nobody flips.
+
+| | cases | silent failures | recall@1 / @5 / MRR |
+|---|---|---|---|
+| ladder + semantic | **37/37** | **0** | 88.9% / 100.0% / 0.979 |
+| semantic only (`NO_RELAX=1`) | 32/37 | 4 | 72.2% / 83.3% / 0.812 |
+| ladder only (`NO_SEMANTIC=1`) | 32/37 | 5 | 72.2% / 83.3% / 0.812 |
+| neither | 28/37 | 8 | 59.7% / 70.8% / 0.688 |
+
+The two middle rows are worth a second look. They score identically and they are
+**not the same 32 cases** — the ladder and the semantic index recover different
+questions, and each is roughly as valuable as the other on this corpus. Neither
+subsumes the other, which is the argument for having both.
+
+### The rung order is not the plan's, and the eval is why
+
+The plan's table tried the zone first, then the window. Measured at 100k rows,
+that ordering produced a wrong answer: *"was anyone at the loading bay that
+morning?"* had its zone dropped, matched a row in a **different zone** inside the
+same window, and stopped — so the window rung, which would have found the person
+actually standing in the loading bay twenty minutes later, never ran.
+
+Stop-at-first-hit means the *order* decides the answer. So the rungs are ordered
+by how much of the question they give up, least first:
+
+| step | relaxes | what survives |
+|---|---|---|
+| 1 | widen the window (bounded) | zone, camera, subject, words — only a boundary moves |
+| 2 | drop the zone | time, subject, words |
+| 3 | drop the subject label | time, zone, words |
+| 4 | drop every place and person filter, rank on meaning alone | the window, the words |
+
+At most three rungs are climbed, and the first non-empty one wins.
+
+**This is only visible at scale.** On the unscaled corpus both orderings score
+37/37; the memory is too small for a wrong-zone row to exist in the window. It is
+the kind of defect that ships.
+
+### Three refusals, each a line of code rather than a hope
+
+A widening search is easy to build and easy to build badly. The bad version
+relaxes until *something* comes back — which is strictly worse than the empty
+result it replaced, because it looks like knowledge.
+
+**It only ever runs on an empty result.** A question that was answered is
+bit-for-bit unchanged, so no existing answer can regress. This is why the phase
+is low-risk despite touching the top of the query path.
+
+**It only drops constraints that resolved to something memory knows.** A zone
+that is a zone, a label that names a real subject. *"Was Mallory here?"* names
+nobody, and dropping a name that matched nobody does not widen the search for
+Mallory — it abandons it and answers about a stranger. This is what makes the
+true-negative cases hold **by construction** rather than by being enumerated
+somewhere.
+
+**It never touches an exclusion.** Exclusions, `entity_type` and
+`min_confidence` survive every rung. *"Anyone except the courier"* is a
+constraint on the answer, and widening may add candidates but never overrule
+what was ruled out.
+
+### The window cap is what stops "next week" reaching the whole memory
+
+Widening is `×1.5` per side **capped at 6 hours**, and the cap is doing the work.
+×4 of a six-hour question is a day, which is a fuzz around what was asked. ×4 of
+a six-*week* question is half a year, which is a different question wearing the
+same words — and it is exactly how `negative_empty_window` ("was anyone there
+next week?") would have reached back through everything ever recorded and
+returned it as an answer.
+
+`negative_nothing_perceived` ("did anyone bring a dog in?") survives for a
+different reason worth naming: the last rung is gated by Phase 6's similarity
+floor. Nothing in this memory scores above 0.30 against *dog*, so the meaning
+rung has nothing to offer and says so. The floor set in Phase 6 to stop the
+semantic index inventing evidence is the same mechanism that stops the ladder
+inventing it.
+
+### Disclosure is the feature, not the packaging
+
+An answer produced by loosening the question is only correct **if it says so**.
+Otherwise it is a correct answer to a question nobody asked, presented as the
+answer to the one they did — worse than the empty result it replaced.
+
+So every hit carries which rung produced it, the trace records every step
+attempted **including the ones that found nothing**, and the narrator's system
+prompt requires it to name the loosened constraint in its first sentence. The
+scored cases assert the disclosure alongside the entities: an undisclosed
+widening fails the case even when it returns exactly the right person.
+
+The rungs that found nothing are not noise. They are the difference between
+*"nothing found"* and *"nothing found, and here is everywhere else I looked"* —
+which is the honest empty this whole plan is named after.
+
+### Latency: it is free, and there is a reason
+
+| | p50 | p95 |
+|---|---|---|
+| ladder off | 67.84 ms | 285.76 ms |
+| ladder on | 67.76 ms | 296.00 ms |
+
+Within noise, and structurally so: the ladder runs **only** on questions that
+returned nothing, and a question that returns nothing is the cheapest kind there
+is — no rows to aggregate, no entities to resolve, no keyframes to pick. The
+worst case is three extra empty queries. The query encode a semantic rung would
+need is already in Phase 6's LRU cache, because the words did not change.
+
+### What Phase 7 deliberately does not do
+
+**It does not re-plan.** No second LLM call. Reflection here is a policy, which
+keeps it free, deterministic, and assertable — a reflection step that costs a
+model call is one nobody can write a test for.
+
+**It does not relax a camera on its own.** Rung 4 drops cameras along with
+everything else structural, but there is no camera-only rung. A camera is a
+physical device someone named; unlike a zone, "the wrong camera" is rarely a
+near-miss.
+
+**It does not widen an answer it considers too small.** One result out of a
+possible two is an answer, not a dead end. Deciding a result is *insufficient* is
+a judgement about what the asker wanted, and this ladder only ever responds to
+the unambiguous case: nothing at all.
+
 ## Baseline detail
 
 Still-failing rows below are stated as of the latest phase row above.
@@ -506,6 +646,15 @@ Still-failing rows below are stated as of the latest phase row above.
 | `paraphrase_phone_call` | G1 | 6 | ✅ * |
 | `paraphrase_smoking` | G1 | 6 | ✅ * |
 | `paraphrase_unattended_bike` | G1 | 6 | ✅ * |
+| `negative_ladder_exhausted` | none | — | ✅ † |
+| `relax_zone_dave_elsewhere` | G4 | 7 | ✅ † |
+| `relax_window_just_missed` | G4 | 7 | ✅ † |
+| `relax_label_wrong_person` | G4 | 7 | ✅ † |
+| `relax_text_only_wrong_camera` | G4 | 7 | ✅ * † |
 
-`*` passes with the optional embedding model installed; without it these four
+`*` passes with the optional embedding model installed; without it these five
 still fail, and the suite asserts that too.
+
+`†` passes with the relaxation ladder on. With `INTELLIGENCE_OS_NO_RELAX=1` these
+five are held to failing instead — the ladder is a supported thing to switch off,
+so it has to be a mode the gate can be run in.

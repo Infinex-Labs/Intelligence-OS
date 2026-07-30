@@ -58,6 +58,15 @@ class _Base(unittest.TestCase):
     """
 
     def setUp(self):
+        # Off for the same reason as in test_search_query_form: several tests
+        # here assert that a filter narrows an aggregate to nothing, and with
+        # the ladder on those would be asserting the much weaker "...and the
+        # ladder also came up empty". The ladder's own behaviour, including
+        # what it does to these aggregates, lives in test_search_reflection.py.
+        self._relax = CONFIG.reflect.enabled
+        CONFIG.reflect.enabled = False
+        self.addCleanup(lambda: setattr(CONFIG.reflect, "enabled", self._relax))
+
         self._dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._dir.cleanup)
         self.store = s = Store(db_path=Path(self._dir.name) / "t.db")

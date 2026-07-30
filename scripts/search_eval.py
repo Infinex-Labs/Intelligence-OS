@@ -90,6 +90,19 @@ def render(report: dict) -> str:
         w("                         pip install sentence-transformers, or unset "
           "INTELLIGENCE_OS_NO_SEMANTIC")
 
+    # Phase 7, reported beside it and for the same reason. Kept as two separate
+    # numbers rather than folded into `passing`: an answer that only exists
+    # because a constraint was loosened is a weaker claim than one that matched
+    # the question as asked, and a scorecard that adds them together is hiding
+    # the distinction it should be surfacing.
+    if report.get("relaxation"):
+        w(f"  RELAXATION LADDER      ON — {report.get('relaxed_answers', 0)} answer(s) "
+          f"came from a loosened query, {report.get('reported_empties', 0)} "
+          f"empt(y/ies) reported what they tried")
+    else:
+        w("  RELAXATION LADDER      off — an empty result is final "
+          "(unset INTELLIGENCE_OS_NO_RELAX)")
+
     # --- what is blocking what ---------------------------------------------
     by_phase: dict[int, list[str]] = {}
     for r in report["cases"]:

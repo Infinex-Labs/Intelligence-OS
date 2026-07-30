@@ -31,6 +31,7 @@ from intelligence_os.tests import _stubs   # noqa: F401  (stubs the deps we lack
 
 import intelligence_os.ask as ask          # noqa: E402
 from intelligence_os.ask import execute, normalize_plan   # noqa: E402
+from intelligence_os.config import CONFIG                  # noqa: E402
 from intelligence_os.store import Store, scene_subject    # noqa: E402
 
 T0 = 1_700_000_000.0
@@ -44,6 +45,19 @@ class _Base(unittest.TestCase):
     """
 
     def setUp(self):
+        # The relaxation ladder is off for this suite, on purpose and not as a
+        # workaround. What is measured here is what ONE pass of the engine does
+        # with a set of filters — and half of these tests assert that a narrow
+        # question comes back empty, which is the property the ladder exists to
+        # respond to. Leaving it on would mean every "and this returns nothing"
+        # assertion was silently really asserting "...and then the ladder failed
+        # to find anything either", which is a different and much weaker claim.
+        # The ladder gets its own suite: tests/test_search_reflection.py. What
+        # it does to a question like these is pinned at the bottom of this file.
+        self._relax = CONFIG.reflect.enabled
+        CONFIG.reflect.enabled = False
+        self.addCleanup(lambda: setattr(CONFIG.reflect, "enabled", self._relax))
+
         self._dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._dir.cleanup)
         self.store = s = Store(db_path=Path(self._dir.name) / "t.db")
@@ -416,6 +430,46 @@ class TestWordQuestionsRespectTheHardFilters(_Base):
     def test_a_word_question_is_still_ranked(self):
         self.assertTrue(execute(self.store, {"text": "smoking"})["ranked"])
         self.assertFalse(execute(self.store, {"zones": ["bay"]})["ranked"])
+
+
+class TestTheLadderCrossesAZoneOnlyOutLoud(_Base):
+    """Where Phase 4's hard-filter rule and Phase 7's ladder actually meet.
+
+    The rule was, and remains: **the ranker cannot cross a hard filter.** A row
+    does not enter an answer because a bm25 or cosine score liked it. That is a
+    property of retrieval and the suite above asserts it with the ladder off,
+    which is the only way to assert it — otherwise every empty assertion would
+    really be saying "and the ladder found nothing either".
+
+    Phase 7 crosses the zone anyway, and the difference is the whole design:
+    it is a POLICY step, taken only after the question as asked returned
+    nothing, applied to the whole query rather than to one row, and reported.
+    "Nothing in the yard; here is the bay, and I am telling you that is what I
+    did" is not the same act as a ranker quietly promoting an out-of-zone row
+    into a list the user believes is zone-filtered.
+    """
+
+    def setUp(self):
+        super().setUp()
+        CONFIG.reflect.enabled = True
+
+    def test_the_wider_answer_arrives_labelled_as_wider(self):
+        got = execute(self.store, {"text": "smoking", "zones": ["yard"]})
+        self.assertEqual(["Ann"], [e["label"] for e in got["entities"]])
+        self.assertEqual("drop_zone", got["relaxation"]["answered_by"])
+        self.assertIn("yard", got["relaxation"]["loosened"])
+
+    def test_the_zone_is_still_absolute_within_a_single_pass(self):
+        """The invariant itself, asserted directly against the pass rather than
+        against the ladder's output — so it cannot be satisfied by the ladder
+        happening not to fire."""
+        plan = normalize_plan({"text": "smoking", "zones": ["yard"]})
+        self.assertEqual([], ask._answer(self.store, {}, plan)["entities"])
+
+    def test_an_answered_zone_question_is_never_widened(self):
+        got = execute(self.store, {"text": "smoking", "zones": ["bay"]})
+        self.assertEqual(["Ann"], [e["label"] for e in got["entities"]])
+        self.assertIsNone(got.get("relaxation"))
 
 
 # --- the planner's vocabulary ------------------------------------------------

@@ -26,6 +26,7 @@ import unittest
 from pathlib import Path
 
 from intelligence_os.tests import _stubs  # noqa: F401  (headless dep stubs)
+from intelligence_os.config import CONFIG
 from intelligence_os.store import Store
 from intelligence_os.ask import execute
 from intelligence_os.tests.fixtures import search_corpus
@@ -56,12 +57,17 @@ SUPPORTED_PLAN_FIELDS = {
     # Phase 6 added no plan field. It changed how `text` is answered — two
     # indexes fused instead of one — which is a retrieval change, not a query
     # form change, and the case list is unchanged as a result.
+    #
+    # Phase 7 added none either, for a stronger reason: the relaxation ladder
+    # only ever runs on a result that came back empty, so there is no plan a
+    # caller can write to invoke it. It is not a query the engine accepts, it
+    # is what the engine does when the query it accepted found nothing.
 }
 
 RECALL_KS = (1, 5, 20)
 
 
-def expected_baseline(case: dict, semantic_on: bool) -> str:
+def expected_baseline(case: dict, semantic_on: bool, relax_on: bool) -> str:
     """Which baseline this case is held to, given what the machine has.
 
     Phase 6's paraphrase cases can only pass where a local embedding model
@@ -73,7 +79,21 @@ def expected_baseline(case: dict, semantic_on: bool) -> str:
     The ratchet survives intact in both modes: each is asserted in both
     directions, so a regression with the model installed is as loud as a
     regression without it, and neither can improve silently.
+
+    Phase 7 needs the same treatment for the same reason. `INTELLIGENCE_OS_NO_RELAX=1`
+    is a supported way to run this system, so it has to be a mode the suite can
+    actually be run in — a switch whose "off" position turns the gate red is a
+    switch nobody flips, and then nobody knows what off does. A case marked
+    `requires_relaxation` is held to failing when the ladder is off, which is
+    the truth: without it, an empty result is where the question ends.
+
+    Note the asymmetry with `semantic_on`, which is measured (did the corpus
+    actually embed?) rather than read off config. There is nothing to measure
+    here — the ladder has no dependency that can be absent, only a flag — so
+    reading the flag IS the honest answer rather than a shortcut around one.
     """
+    if case.get("requires_relaxation") and not relax_on:
+        return "fail"
     if semantic_on and case.get("baseline_semantic"):
         return case["baseline_semantic"]
     return case.get("baseline", "fail")
@@ -192,6 +212,19 @@ def evaluate(case: dict, result: dict, corpus: dict) -> tuple[bool, list[str]]:
     if max_ents is not None and len(got) > max_ents:
         why.append(f"{len(got)} entities exceeds limit of {max_ents}")
 
+    # Phase 7. Held to the same standard as the entities, because an answer
+    # produced by loosening the question is only correct if it says so: the
+    # ladder's whole justification is that a disclosed widening beats a silent
+    # empty, and an undisclosed one is neither.
+    rx = result.get("relaxation") or {}
+    want_step = case.get("expect_relaxed_by")
+    if want_step and rx.get("answered_by") != want_step:
+        why.append(f"expected the answer to come from relaxing {want_step!r}, "
+                   f"got {rx.get('answered_by')!r}")
+    if case.get("expect_relaxation_tried") and not rx.get("attempted"):
+        why.append("the ladder recorded no attempt — an empty result that was "
+                   "never widened is the silent failure this phase is about")
+
     return (not why), why
 
 
@@ -220,6 +253,7 @@ def run_case(case: dict, corpus: dict) -> dict:
     """Execute one case. Never raises: a crash is a result, and a scored one."""
     store: Store = corpus["_store"]
     semantic_on = bool(corpus.get("semantic"))
+    relax_on = bool(CONFIG.reflect.enabled)
     plan = resolve_plan(case, corpus)
     missing = unsupported_fields(plan)
 
@@ -244,13 +278,24 @@ def run_case(case: dict, corpus: dict) -> dict:
         "question": case["question"],
         "gap": case.get("gap", "none"),
         "fixed_by": case.get("fixed_by", 0),
-        "baseline": expected_baseline(case, semantic_on),
+        "baseline": expected_baseline(case, semantic_on, relax_on),
         "actual": "pass" if passed else "fail",
         "why": why,
         "unsupported": missing,
         # The headline metric: an answer existed, and we returned nothing at all
         # without saying so. Indistinguishable to the user from "it never happened".
         "silent_failure": bool(expectations and not result.get("entities")),
+        # Phase 7, and deliberately NOT folded into the line above. Redefining
+        # the headline metric so that a new phase appears to move it is the one
+        # thing a scorecard must never do — every earlier row was measured with
+        # `silent_failure` meaning exactly what it says there, and it has to
+        # keep meaning that or the trajectory is fiction. These are separate
+        # columns: which rung answered, and whether an empty result at least
+        # said what it tried before giving up.
+        "n_entities": len(result.get("entities") or []),
+        "relaxed_by": (result.get("relaxation") or {}).get("answered_by"),
+        "empty_reported": bool(not result.get("entities")
+                               and (result.get("relaxation") or {}).get("attempted")),
         "metrics": rank_metrics(case, result, corpus) if not missing else None,
         "elapsed_ms": elapsed_ms,
     }
@@ -280,6 +325,10 @@ def run_all(scale: int = 0) -> dict:
             "passing": sum(1 for r in rows if r["actual"] == "pass"),
             "total": len(rows),
             "silent_failures": sum(1 for r in rows if r["silent_failure"]),
+            # How many answers only exist because a constraint was loosened, and
+            # how many empties came back with their working shown (Phase 7).
+            "relaxed_answers": sum(1 for r in rows if r["relaxed_by"]),
+            "reported_empties": sum(1 for r in rows if r["empty_reported"]),
             "ranking": agg,
             "latency_ms": {
                 "p50": _pct(latencies, 0.50),
@@ -292,6 +341,10 @@ def run_all(scale: int = 0) -> dict:
             # against Phase 2's lexical retrieval — which the scorecard has to
             # say out loud, or two runs on two laptops read as a regression.
             "semantic": corpus.get("semantic", 0),
+            # Whether dead ends were widened at all. Same purpose as the line
+            # above: two runs with different switches must not read as a
+            # regression in each other's direction.
+            "relaxation": bool(CONFIG.reflect.enabled),
         }
     finally:
         corpus["_store"].close()
@@ -327,13 +380,23 @@ class SearchQualityBaseline(unittest.TestCase):
         self.assertEqual([], msgs, "\n" + "\n".join(msgs))
 
     def test_true_negatives_stay_empty(self):
-        """The guard against Phase 7 relaxing its way into inventing an answer."""
+        """The guard against Phase 7 relaxing its way into inventing an answer.
+
+        Asserts EMPTINESS directly rather than the case's overall verdict. Those
+        are not the same claim: `negative_ladder_exhausted` also expects the
+        ladder to have run, so with the ladder switched off it correctly reads
+        as a failing case — while still returning nothing, which is the only
+        thing this guard is about. Reading the verdict would have made the most
+        important assertion in the suite depend on every other expectation those
+        cases happen to carry.
+        """
         rows = {r["id"]: r for r in self.report["cases"]}
         negatives = [c["id"] for c in load_cases() if c.get("expect_empty")]
         self.assertTrue(negatives, "no true-negative cases — the guard is vacuous")
         for cid in negatives:
-            self.assertEqual("pass", rows[cid]["actual"],
-                             f"{cid} must return nothing: {rows[cid]['why']}")
+            self.assertEqual(0, rows[cid]["n_entities"],
+                             f"{cid} must return nothing, relaxed or not; "
+                             f"got {rows[cid]['n_entities']} entities")
 
     def test_corpus_is_deterministic(self):
         """Two builds must agree, or every metric here is noise."""
