@@ -111,13 +111,22 @@ EXISTS`, so it self-migrates and there is no migrations tool.
 |---|---|
 | `entities` | A person or object. Anonymous by default (`entity_N`); gains a `label` when an operator names them. |
 | `signatures` | L2-normalised face vectors per entity — the gallery. Capped and pruned to capture pose/lighting variation without storing near-duplicates. |
-| `observations` | The raw transcript: `subject → predicate → object` at a `location` and `timestamp`, tagged with `origin` (detector / vlm / rule), a `source_ref` keyframe, and a `camera_id`. Predicates are **open strings**, not an enum. |
+| `observations` | The raw transcript: `subject → predicate → object` at a `location` and `timestamp`, tagged with `origin` (detector / vlm / rule), a `source_ref` keyframe, and a `camera_id`. Predicates are **open strings**, not an enum. `text` is the same fact in human wording — the search surface — and `description_id` points back at the report it was flattened out of. |
+| `scene_descriptions` | Each VLM report kept whole: `raw` JSON plus flattened `text`. Rows in `observations` are a flattening of these, so a report can be re-flattened later and a fact that goes missing is provable. |
 | `locations` | Zones, scoped to one camera's frame. |
 | `scene_snapshots` | Who was present in a zone at a point in time. |
 | `relations` | Distilled `relation` / `habit` / `event` rows with a `weight`, a `candidate → confirmed` lifecycle, decay, and `supporting_observation_ids` for provenance. |
 | `conversations`, `chat_turns` | The assistant's threads, each turn keeping the evidence payload it was rendered from. |
 | `users`, `sessions` | Dashboard auth (scrypt password hashes). |
 | `cases`, `reports` | Operator workflow — grouping evidence, and generated briefings. |
+
+One wrinkle worth knowing about `observations.subject_entity_id`: most rows point
+at an `entities` row, but facts nobody owns — an open gate, a spill, a leaning
+stack of pallets — are written against a synthetic `scene:<location_id>` subject
+instead (`store.scene_subject()`). The alternative was pinning them on whichever
+person happened to be in frame, which would turn an observation about a place
+into a fabricated claim about a person. `ask.execute()` renders these as a
+pseudo-entity named for the zone.
 
 ### The invariant
 

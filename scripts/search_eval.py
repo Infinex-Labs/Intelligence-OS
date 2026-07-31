@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Score search quality and print the card (search plan Phase 0).
+
+    python scripts/search_eval.py                 # the scorecard
+    python scripts/search_eval.py --scale 100000  # + latency on a real-sized memory
+    python scripts/search_eval.py --write-baseline
+
+Offline, no API key: the query plans are stubbed, so this measures retrieval
+rather than how well the LLM parses English.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from intelligence_os.tests.test_search_quality import run_all  # noqa: E402
+
+BAR = "─" * 78
+
+
+def _fmt_pct(x: float) -> str:
+    return f"{x * 100:5.1f}%"
+
+
+def render(report: dict) -> str:
+    out: list[str] = []
+    w = out.append
+    w(BAR)
+    w("SEARCH QUALITY SCORECARD")
+    w(BAR)
+
+    # --- per-case table -----------------------------------------------------
+    w("")
+    w(f"{'case':34} {'gap':5} {'fix':>3}  {'base':5} {'now':5} note")
+    w("-" * 78)
+    for r in sorted(report["cases"], key=lambda r: (r["fixed_by"], r["id"])):
+        drift = ""
+        if r["baseline"] != r["actual"]:
+            drift = " <-- DRIFT" if r["baseline"] == "pass" else " <-- IMPROVED"
+        note = (r["why"][0] if r["why"] else "ok")
+        if len(note) > 26:
+            note = note[:23] + "..."
+        w(f"{r['id'][:34]:34} {r['gap']:5} {r['fixed_by']:>3}  "
+          f"{r['baseline']:5} {r['actual']:5} {note}{drift}")
+
+    # --- headline numbers ---------------------------------------------------
+    total, passing = report["total"], report["passing"]
+    w("")
+    w(BAR)
+    w("HEADLINE")
+    w(BAR)
+    w(f"  cases passing          {passing}/{total}   ({_fmt_pct(passing / total)})")
+    w(f"  SILENT FAILURES        {report['silent_failures']}/{total}   "
+      f"answers that exist, returned as nothing")
+
+    rk = report["ranking"]
+    w("")
+    w("  ranking (entity-level, over cases expecting specific entities)")
+    for k in (1, 5, 20):
+        w(f"    recall@{k:<2}            {_fmt_pct(rk[f'recall@{k}'])}")
+    w(f"    MRR                  {rk['mrr']:.3f}")
+
+    ret = report["retention"]
+    w("")
+    w(f"  PERCEPTION RETENTION   {_fmt_pct(ret['rate'])}   "
+      f"({ret['retained']}/{ret['perceived']} facts the VLM reported are searchable)")
+    for section, b in sorted(ret["sections"].items()):
+        flag = "" if b["retained"] == b["perceived"] else "   <-- DISCARDED"
+        w(f"    {section:26} {b['retained']}/{b['perceived']}{flag}")
+
+    lat = report["latency_ms"]
+    w("")
+    w(f"  latency  p50 {lat['p50']:>8.2f} ms   p95 {lat['p95']:>8.2f} ms"
+      f"   (corpus scale: {report['scale'] or 'unscaled'})")
+
+    # Stated, never inferred. Every number above means something different in
+    # the two modes, and two runs on two laptops would otherwise read as a
+    # regression in the code rather than a difference in what was installed.
+    n = report.get("semantic", 0)
+    w("")
+    if n:
+        w(f"  SEMANTIC INDEX         {n} vector(s) — meaning-based retrieval is ON")
+    else:
+        w("  SEMANTIC INDEX         none — lexical only (Phase 2 behaviour).")
+        w("                         pip install sentence-transformers, or unset "
+          "INTELLIGENCE_OS_NO_SEMANTIC")
+
+    # Phase 7, reported beside it and for the same reason. Kept as two separate
+    # numbers rather than folded into `passing`: an answer that only exists
+    # because a constraint was loosened is a weaker claim than one that matched
+    # the question as asked, and a scorecard that adds them together is hiding
+    # the distinction it should be surfacing.
+    if report.get("relaxation"):
+        w(f"  RELAXATION LADDER      ON — {report.get('relaxed_answers', 0)} answer(s) "
+          f"came from a loosened query, {report.get('reported_empties', 0)} "
+          f"empt(y/ies) reported what they tried")
+    else:
+        w("  RELAXATION LADDER      off — an empty result is final "
+          "(unset INTELLIGENCE_OS_NO_RELAX)")
+
+    # Phase 8, and the wording is chosen to keep it out of the scores above.
+    # Visual re-ranking cannot change WHICH rows an answer contains, only their
+    # order, so it cannot move `passing`, `silent failures` or recall@k — the
+    # right row is either retrieved or it is not, and that was settled before
+    # this ran. A scorecard line that implied otherwise would be inviting
+    # someone to read a latency wobble as a quality change.
+    if report.get("visual"):
+        w(f"  VISUAL RE-RANK         ON — {report['visual']} keyframe vector(s); "
+          f"orders results, never widens them")
+    else:
+        w("  VISUAL RE-RANK         off — result ORDER is the other two indexes' "
+          "(set INTELLIGENCE_OS_VISUAL=1)")
+
+    # --- what is blocking what ---------------------------------------------
+    by_phase: dict[int, list[str]] = {}
+    for r in report["cases"]:
+        if r["actual"] == "fail":
+            by_phase.setdefault(r["fixed_by"], []).append(r["id"])
+    if by_phase:
+        w("")
+        w(BAR)
+        w("FAILING CASES BY PHASE THAT SHOULD FIX THEM")
+        w(BAR)
+        for phase in sorted(by_phase):
+            w(f"  Phase {phase}: {len(by_phase[phase])} case(s)")
+            for cid in sorted(by_phase[phase]):
+                w(f"      - {cid}")
+    w("")
+    return "\n".join(out)
+
+
+def baseline_markdown(report: dict) -> str:
+    rk, ret, lat = report["ranking"], report["retention"], report["latency_ms"]
+    lines = [
+        "# Search baseline scorecard",
+        "",
+        "Generated by `python scripts/search_eval.py --write-baseline`. One row per",
+        "phase of [the search architecture plan](search-architecture-plan.md); append,",
+        "never overwrite, so the trajectory stays in version control.",
+        "",
+        "| phase | cases passing | silent failures | recall@1 | recall@5 | MRR | retention | p50 ms | p95 ms |",
+        "|---|---|---|---|---|---|---|---|---|",
+        f"| **0 — baseline** | {report['passing']}/{report['total']} "
+        f"| {report['silent_failures']}/{report['total']} "
+        f"| {_fmt_pct(rk['recall@1']).strip()} | {_fmt_pct(rk['recall@5']).strip()} "
+        f"| {rk['mrr']:.3f} | {_fmt_pct(ret['rate']).strip()} "
+        f"| {lat['p50']:.2f} | {lat['p95']:.2f} |",
+        "",
+        f"Latency measured at corpus scale **{report['scale'] or 'unscaled'}** "
+        "observations. Reproduce with:",
+        "",
+        f"```\npython scripts/search_eval.py --scale {report['scale']} --write-baseline\n```",
+        "",
+        "## What the baseline row means",
+        "",
+        "- **silent failures** — the question had an answer in the corpus and search",
+        "  returned nothing, with no indication it had failed. The headline metric:",
+        "  to a user this is indistinguishable from \"it never happened\".",
+        "- **retention** — of the facts the vision model actually reported, the share",
+        "  that survived the write path into a searchable row. Anything under 100% is",
+        "  perception the system paid for and then discarded (gap G2).",
+        "- **recall / MRR** — entity-level, over the cases that name expected entities.",
+        "  Today's ordering is by `first_seen`, not relevance, so MRR measures the",
+        "  absence of ranking rather than the quality of it. At this corpus size result",
+        "  lists are short, so recall@1 and recall@20 coincide; they only separate once",
+        "  Phases 2 and 6 start returning ranked candidate sets worth cutting off.",
+        "- **latency** — wall clock for `ask.execute()` alone, excluding both LLM calls.",
+        "  Padding rows sit in their own zone and on their own entity, so scaling the",
+        "  corpus changes how much the engine sifts without changing any answer.",
+        "",
+        "## Baseline detail",
+        "",
+        "| case | gap | fixed by phase | today |",
+        "|---|---|---|---|",
+    ]
+    for r in sorted(report["cases"], key=lambda r: (r["fixed_by"], r["id"])):
+        mark = "✅" if r["actual"] == "pass" else "❌"
+        lines.append(f"| `{r['id']}` | {r['gap']} | {r['fixed_by'] or '—'} | {mark} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="search_eval")
+    p.add_argument("--scale", type=int, default=0,
+                   help="pad the corpus with N filler observations before measuring latency")
+    p.add_argument("--write-baseline", action="store_true",
+                   help="write docs/search-baseline.md")
+    args = p.parse_args(argv)
+
+    report = run_all(scale=args.scale)
+    print(render(report))
+
+    if args.write_baseline:
+        dest = ROOT / "docs" / "search-baseline.md"
+        dest.write_text(baseline_markdown(report))
+        print(f"wrote {dest.relative_to(ROOT)}")
+
+    drift = [r["id"] for r in report["cases"] if r["baseline"] == "pass"
+             and r["actual"] == "fail"]
+    if drift:
+        print(f"REGRESSION: {drift}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

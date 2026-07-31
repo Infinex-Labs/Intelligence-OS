@@ -363,6 +363,15 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 .casemeta{display:flex;gap:18px;margin-top:12px;padding-top:12px;border-top:1px solid var(--rule);font-family:'IBM Plex Mono';font-size:11px;color:var(--ink-3);flex-wrap:wrap}
 
 /* settings + forms */
+/* detection classes — grouped by kind, because the kind is what decides how the
+   system may talk about the thing later (a dog is accompanied, a laptop is used) */
+.clsgrp{padding:12px 0;border-bottom:1px solid var(--rule)}
+.clsgrp h5{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+           color:var(--ink-3);margin-bottom:8px}
+.clsgrp h5 em{font-style:normal;text-transform:none;letter-spacing:0;font-weight:400;
+              font-family:'IBM Plex Mono';font-size:10.5px}
+.clsgrp .w{display:flex;flex-wrap:wrap;gap:6px}
+.clsgrp .chip{font-size:11.5px;padding:5px 10px}
 .setrow{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 0;border-bottom:1px solid var(--rule)}
 .setrow:last-child{border-bottom:0}
 .setrow .t{max-width:62ch}
@@ -392,6 +401,21 @@ input[type=text]:focus,input[type=password]:focus,textarea:focus,select:focus{ou
 .pill.down{background:var(--stale-bg);color:var(--stale)}
 .mrow{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--rule)}
 .mrow:last-child{border-bottom:0}
+
+/* rules — the compiler answers back here. A refusal is the loudest thing on the
+   pane on purpose (§9.2: never silently not watch what you were asked to). */
+.verdict{border:1px solid;border-radius:9px;padding:12px 14px;margin-top:14px;font-size:13px;line-height:1.5}
+.verdict h4{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;margin-bottom:5px}
+.verdict.pass{border-color:var(--ok);background:var(--ok-bg);color:var(--ok)}
+.verdict.block{border-color:var(--fired-line);background:var(--fired-bg);color:var(--fired)}
+.verdict.warn{border-color:var(--stale-line);background:var(--stale-bg);color:var(--stale)}
+.verdict p{color:var(--ink-2)}
+.spec{margin-top:10px;border-top:1px solid var(--rule);padding-top:9px;
+      display:grid;grid-template-columns:auto 1fr;gap:3px 12px;
+      font-family:'IBM Plex Mono';font-size:11px}
+.spec dt{color:var(--ink-3)}.spec dd{color:var(--ink-2);word-break:break-word}
+.rsrc{color:var(--ink-3);font-size:12px;margin-top:3px;max-width:52ch}
+.rwatch{font-family:'IBM Plex Mono';font-size:11px;color:var(--ink-2)}
 
 /* live wall */
 .wall{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
@@ -610,6 +634,7 @@ body:has(#assistant.on) .main{min-height:0;overflow:hidden}
       <button data-p="map"><span class="ico">◎</span><span>Map View</span></button>
       <button data-p="graph"><span class="ico">◇</span><span>Network Graph</span></button>
       <button data-p="alerts"><span class="ico">◔</span><span>Alerts</span><span class="badge" id="alertBadge" hidden>0</span></button>
+      <button data-p="rules"><span class="ico">⌁</span><span>Rules</span></button>
       <button data-p="entities"><span class="ico">◈</span><span>Entities</span></button>
       <button data-p="cases"><span class="ico">▭</span><span>Cases</span></button>
       <button data-p="reports"><span class="ico">≡</span><span>Reports</span></button>
@@ -789,7 +814,7 @@ body:has(#assistant.on) .main{min-height:0;overflow:hidden}
     </section>
     <!-- ---------- ALERTS ---------- -->
     <section class="pane canvas" id="alerts">
-      <div class="panehead"><div><h1>Alerts</h1><p id="alertSub">Triage by severity, camera or type — acknowledge or resolve.</p></div><div class="r"><button class="btn btn-s" id="markAllRead">Mark all read</button><button class="btn btn-s solid" onclick="go('settings')">New rule</button></div></div>
+      <div class="panehead"><div><h1>Alerts</h1><p id="alertSub">Triage by severity, camera or type — acknowledge or resolve.</p></div><div class="r"><button class="btn btn-s" id="markAllRead">Mark all read</button><button class="btn btn-s solid" onclick="go('rules')">New rule</button></div></div>
       <div class="filterbar" id="alertFilters">
         <label class="fsearch"><span class="mono">⌕</span><input id="alertSearch" placeholder="Search alerts…"></label>
         <button class="chip" data-sev="" aria-pressed="true">All <span class="c">0</span></button>
@@ -893,6 +918,45 @@ body:has(#assistant.on) .main{min-height:0;overflow:hidden}
       </div>
     </section>
 
+    <!-- ---------- RULES ----------
+         The compiler already lived behind /api/rules; this pane is its face.
+         Writing a rule is a conversation with a compiler that is allowed to say
+         no, so the verdict is rendered as prominently as the rule itself. -->
+    <section class="pane canvas" id="rules">
+      <div class="panehead"><div><h1>Rules</h1><p id="ruleSub">Say what to watch for in plain English. The compiler decides whether a camera can honestly see it.</p></div></div>
+      <div class="split">
+        <div>
+          <div class="tablewrap">
+            <table class="tbl">
+              <thead><tr><th>Rule</th><th>Watches</th><th>Confirmed by</th><th style="text-align:right">On</th></tr></thead>
+              <tbody id="ruleRows"></tbody>
+            </table>
+          </div>
+          <p class="hint" style="margin-top:10px">Turning a rule off keeps it here and stops it firing. Both take effect within a couple of seconds — no restart.</p>
+        </div>
+        <div>
+          <div class="formcard">
+            <div class="h2"><h3>Write a rule</h3><p>One sentence, the way you'd say it to a colleague.</p></div>
+            <div class="b">
+              <div class="field">
+                <label for="ruleText">What should it watch for?</label>
+                <textarea id="ruleText" rows="3" placeholder="tell me if someone leaves a bag by the back gate"></textarea>
+              </div>
+              <div style="display:flex;gap:9px;align-items:center">
+                <button class="btn solid" id="ruleAdd">Compile &amp; save</button>
+                <span class="mono" id="ruleBusy" style="font-size:11.5px;color:var(--ink-3)"></span>
+              </div>
+              <div id="ruleVerdict"></div>
+            </div>
+          </div>
+          <div class="sidecard"><div class="pad">
+            <p>Two answers are refusals, and both are deliberate. A rule that needs something a camera cannot observe — a mood, an intent — is blocked rather than half-watched. A rule about one named person needs face matching, which is off unless you turn it on.</p>
+            <span class="mono" style="color:var(--ink-3)">scope · what a camera can honestly see</span>
+          </div></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ---------- CAMERA MANAGER ---------- -->
     <section class="pane canvas" id="cameras">
       <div class="panehead"><div><h1>Camera Manager</h1><p id="camSub">Add sources, name them, and draw zones rules can watch.</p></div><div class="r"><button class="btn btn-s" id="camTestAll">Test all</button></div></div>
@@ -958,6 +1022,18 @@ body:has(#assistant.on) .main{min-height:0;overflow:hidden}
               <div class="setrow"><div class="t"><p>Keep keyframes for</p><span>Keyframes delete on this schedule. The graph of what happened is kept.</span></div><span style="display:flex;gap:6px;align-items:center"><input id="setRet" type="number" min="1" max="3650" style="width:78px"><span class="mono" style="color:var(--ink-3)">days</span><button class="btn btn-s" id="setRetSave">Save</button></span></div>
               <div class="setrow"><div class="t"><p>Data directory</p><span>One folder. Back it up or move it, and nothing else needs to come along.</span></div><span class="mono" id="setDir" style="color:var(--ink-3)">—</span></div>
               <div style="display:flex;gap:9px;margin-top:16px"><button class="btn" id="setExport">Export memory</button><button class="btn" id="setRebuild">Rebuild baseline</button></div>
+            </div>
+          </div>
+          <div class="formcard">
+            <div class="h2"><h3>What the cameras look for</h3><p>The detector can name eighty kinds of thing. Anything not switched on here is discarded the instant it is seen — it never becomes an entity, never gains a relation, and no rule can ever fire on it. People are always detected.</p></div>
+            <div class="b" style="padding-top:4px">
+              <div id="setClasses"></div>
+              <div class="setrow" style="border-bottom:0;padding-bottom:2px">
+                <div class="t"><span id="setClsNote">—</span></div>
+                <span style="display:flex;gap:9px;align-items:center">
+                  <span class="pill down" id="setClsPill" hidden>restart needed</span>
+                  <button class="btn btn-s" id="setClsSave">Save</button></span>
+              </div>
             </div>
           </div>
         </div>
@@ -1049,7 +1125,7 @@ const j=(url,opts)=>fetch(url,opts).then(r=>r.json());
 window.esc=esc; window.j=j;
 
 /* ---------- nav (FR-SH-2a: hash routes, never a page load) ---------- */
-const titles={dashboard:'Dashboard',live:'Live View',timeline:'Timeline',map:'Map View',graph:'Network Graph',alerts:'Alerts',entities:'Entities',cases:'Cases',reports:'Reports',assistant:'AI Assistant',cameras:'Camera Manager',settings:'System Settings'};
+const titles={dashboard:'Dashboard',live:'Live View',timeline:'Timeline',map:'Map View',graph:'Network Graph',alerts:'Alerts',rules:'Rules',entities:'Entities',cases:'Cases',reports:'Reports',assistant:'AI Assistant',cameras:'Camera Manager',settings:'System Settings'};
 const btns=[...document.querySelectorAll('.nav button')];
 const onEnter={};                      // pane id -> fn(extra), filled by later milestones
 window.onEnter=onEnter;
@@ -2114,6 +2190,110 @@ async function showEvidence(rid){
 }
 
 /* ================================================================
+   Rules (§9.2) — the authoring surface for /api/rules.
+   Writes to the same `cmdRules` the ⌘K palette reads, so the palette
+   cannot go stale against the pane.
+   ================================================================ */
+
+let cmdRules=[];        /* shared with the ⌘K palette, which reads it lazily */
+
+/* what the cascade will actually key on, in the order it checks it */
+function ruleWatches(r){
+  const t=r.trigger||{}, bits=[t.class||'anything'];
+  bits.push(t.zone?`in ${t.zone}`:'anywhere');
+  if(t.camera)bits.push(`on ${t.camera}`);
+  const d=+(r.gate?.dwell_seconds||0);
+  if(d)bits.push(`after ${d}s`);
+  return bits.join(' · ');
+}
+
+function paintRules(){
+  const on=cmdRules.filter(r=>r.enabled!==false).length;
+  $('ruleSub').textContent=cmdRules.length
+    ? `${cmdRules.length} rule${cmdRules.length>1?'s':''} · ${on} watching.`
+    : 'No rules yet — write one on the right.';
+  $('ruleRows').innerHTML=cmdRules.length?cmdRules.map(r=>{
+    const live=r.enabled!==false;
+    return `<tr>
+      <td><b>${esc(ruleName(r.name))}</b>${r.source?`<div class="rsrc">“${esc(r.source)}”</div>`:''}</td>
+      <td class="rwatch">${esc(ruleWatches(r))}</td>
+      <td class="rwatch">${r.verify?.prompt
+          ? `a look · <span style="color:var(--ink-3)">${esc(r.verify.prompt)}</span>`
+          : 'geometry alone'}</td>
+      <td style="text-align:right"><button class="sw${live?'':' off'}" data-rt="${esc(r.name)}"
+          aria-pressed="${live}" aria-label="Toggle ${esc(r.name)}"></button></td>
+    </tr>`;
+  }).join('')
+  :`<tr><td colspan="4" class="mono" style="color:var(--ink-3);padding:22px">no rules yet</td></tr>`;
+}
+
+async function loadRules(){
+  try{ cmdRules=(await j('/api/rules')).rules||[]; }catch(e){ cmdRules=[]; }
+  paintRules();
+}
+
+/* A refusal is an answer, not an error — it gets the same real estate as a pass.
+   The compiled spec is shown on success because English went in and a machine
+   contract came out; you should see which one you actually saved. */
+const VERDICT_HEAD={infeasible:['block','Not compiled'],
+                    needs_identity:['warn','Needs face matching'],
+                    no_key:['warn','Needs an API key']};
+
+function showVerdict(res){
+  const box=$('ruleVerdict');
+  if(!res){ box.innerHTML=''; return; }
+  if(res.refused){
+    const [cls,head]=VERDICT_HEAD[res.reason]||['block','Not compiled'];
+    box.innerHTML=`<div class="verdict ${cls}"><h4>${head}</h4>
+      <p>${esc(res.message||'')}</p></div>`;
+    return;
+  }
+  const r=res.rule||{}, t=r.trigger||{};
+  box.innerHTML=`<div class="verdict pass"><h4>Armed</h4>
+    <p>Saved as <b>${esc(r.name)}</b> — watching within a couple of seconds.</p>
+    <dl class="spec">
+      <dt>class</dt><dd>${esc(t.class||'anything')}</dd>
+      <dt>zone</dt><dd>${esc(t.zone||'anywhere')}</dd>
+      ${t.camera?`<dt>camera</dt><dd>${esc(t.camera)}</dd>`:''}
+      <dt>dwell</dt><dd>${+(r.gate?.dwell_seconds||0)}s</dd>
+      <dt>cooldown</dt><dd>${+(r.cooldown?.per_track_seconds||0)}s per subject</dd>
+      <dt>verify</dt><dd>${r.verify?.prompt?esc(r.verify.prompt)
+                          :'geometry only — no model call'}</dd>
+    </dl></div>`;
+}
+
+$('ruleAdd').onclick=async()=>{
+  const text=$('ruleText').value.trim();
+  if(!text)return toast('Write the rule first');
+  $('ruleAdd').disabled=true; $('ruleBusy').textContent='compiling…'; showVerdict(null);
+  try{
+    const res=await j('/api/rules',{method:'POST',body:JSON.stringify({text})});
+    showVerdict(res);
+    if(!res.refused){
+      $('ruleText').value='';
+      toast(`${ruleName(res.rule.name)} armed · no restart needed`);
+      loadRules();
+    }
+  }catch(e){
+    showVerdict({refused:true,reason:'infeasible',
+                 message:'The compiler could not be reached. The rule was not saved.'});
+  }finally{ $('ruleAdd').disabled=false; $('ruleBusy').textContent=''; }
+};
+
+$('ruleRows').onclick=async e=>{
+  const btn=e.target.closest('[data-rt]'); if(!btn)return;
+  const name=btn.dataset.rt;
+  btn.disabled=true;
+  try{
+    const r=await j(`/api/rules/${encodeURIComponent(name)}/toggle`,{method:'POST'});
+    toast(`${ruleName(name)} ${r.enabled?'on':'off'} · takes effect in a moment`);
+  }catch(err){ toast('Could not change the rule'); }
+  loadRules();       // repaint from the server either way — never from the click
+};
+
+onEnter.rules=loadRules;
+
+/* ================================================================
    M6 — camera manager (FR-CM-1,2,4)
    Rides the M2 poll: `cams` is already refreshed every 10s, so the
    table cannot disagree with the wall.
@@ -2262,8 +2442,68 @@ async function loadSettings(){
     $('setEngine').className='pill '+(st.system.engine==='running'?'up':'down');
     $('setStore').textContent=st.system.storage
       ? `${tb(st.system.storage.used_bytes)} / ${tb(st.system.storage.total_bytes)} TB`:'—';
+    clsPicked=new Set(s.object_classes||[]);
+    paintClasses();
   }catch(e){}
 }
+
+/* ---- detection classes -------------------------------------------------
+   Grouped by kind rather than listed alphabetically: the kind is not cosmetic,
+   it decides what the distiller may later assert about the thing, and — for
+   animals and vehicles — that it is never re-identified across a restart. */
+let clsPicked=new Set(), clsRestartArmed=false;
+const CLS_GROUPS=[
+  ['animal','Animals',  'tracked live, never re-matched across a restart'],
+  ['vehicle','Vehicles','tracked live, never re-matched across a restart'],
+  ['object','Things',   're-matched across restarts by appearance'],
+];
+
+function paintClasses(){
+  const kinds=setState.class_kinds||{}, all=setState.available_classes||[];
+  $('setClasses').innerHTML=CLS_GROUPS.map(([kind,title,note])=>{
+    const names=all.filter(c=>kinds[c]===kind);
+    if(!names.length)return '';
+    return `<div class="clsgrp"><h5>${title} <em>· ${note}</em></h5><div class="w">${
+      names.map(c=>`<button class="chip" data-cls="${esc(c)}"
+        aria-pressed="${clsPicked.has(c)}">${esc(c)}</button>`).join('')}</div></div>`;
+  }).join('');
+  const saved=new Set(setState.object_classes||[]);
+  const dirty=clsPicked.size!==saved.size||[...clsPicked].some(c=>!saved.has(c));
+  $('setClsNote').textContent=clsPicked.size
+    ? `${clsPicked.size} class${clsPicked.size>1?'es':''} kept, plus people.`
+      +(dirty?' Unsaved.':'')
+    : 'Nothing but people is being kept.';
+  $('setClsPill').hidden=!clsRestartArmed;
+}
+
+$('setClasses').onclick=e=>{
+  const b=e.target.closest('[data-cls]'); if(!b)return;
+  const c=b.dataset.cls;
+  clsPicked.has(c)?clsPicked.delete(c):clsPicked.add(c);
+  b.setAttribute('aria-pressed',String(clsPicked.has(c)));
+  paintClasses();
+};
+
+$('setClsSave').onclick=async()=>{
+  if(!clsPicked.size)return toast('Pick at least one class');
+  $('setClsSave').disabled=true;
+  try{
+    const r=await j('/api/settings',{method:'POST',
+      body:JSON.stringify({object_classes:[...clsPicked]})});
+    setState.object_classes=r.object_classes;
+    /* Unlike a rule, this one really does wait: the detector reads its class
+       filter once, when it is constructed. Saying "saved" alone would imply the
+       camera is already looking for the new class. */
+    if(r.classes_need_restart){
+      clsRestartArmed=true;
+      toast('Saved · takes effect when the pipeline restarts');
+    }else toast('Saved');
+    if(r.rejected_classes?.length)
+      toast(`Not a detectable class: ${r.rejected_classes.join(', ')}`);
+    paintClasses();
+  }catch(e){ toast('Could not save'); }
+  finally{ $('setClsSave').disabled=false; }
+};
 const saveSettings=async body=>{
   try{ await j('/api/settings',{method:'POST',body:JSON.stringify(body)}); return true; }
   catch(e){ toast('Could not save'); return false; }
@@ -2616,7 +2856,7 @@ onEnter.reports=loadReports;
    already on screen plus rules.yaml. Anything it can't match is a question,
    and questions belong to the assistant — that's the last row, always. */
 const CIC={pane:'▤',camera:'▣',entity:'◆',rule:'▲',ask:'✧'};
-let cmdRules=[], cmdHits=[], cmdSel=0;
+let cmdHits=[], cmdSel=0;   /* cmdRules is owned by the rules pane, above */
 
 /* jumping to a filtered pane = typing in its own search box, so the pane's
    existing handler does the work and the box shows why the list is short */

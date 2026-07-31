@@ -8,7 +8,7 @@ from pathlib import Path
 
 from intelligence_os.tests import _stubs   # noqa: F401  (stubs the deps we lack)
 
-from intelligence_os import web                      # noqa: E402
+from intelligence_os import config, web              # noqa: E402
 from intelligence_os.store import Store              # noqa: E402
 
 NOW = time.time()
@@ -19,6 +19,13 @@ class TestEntitiesPayload(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         db = Path(self.tmp.name) / "t.db"
+        # A keyframe is only advertised if the frame survives retention
+        # (config.retained_keyframe), so the fixture writes the frames it cites.
+        frames = Path(self.tmp.name) / "frames"
+        frames.mkdir()
+        for i in range(10):
+            (frames / f"{i}.jpg").write_bytes(b"jpg")
+        self._real_frames, config.FRAMES_DIR = config.FRAMES_DIR, frames
         s = Store(db_path=db)
         # Seen 10x over 2 days -> 5/day -> high.
         self.hot = s.create_entity("person", label="Regular")
@@ -44,6 +51,7 @@ class TestEntitiesPayload(unittest.TestCase):
 
     def tearDown(self):
         web.Store = self._real
+        config.FRAMES_DIR = self._real_frames
         self.tmp.cleanup()
 
     def _get(self):

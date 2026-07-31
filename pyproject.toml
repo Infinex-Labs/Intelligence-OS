@@ -48,8 +48,14 @@ dependencies = [
 # to boot, and the app degrades to the next-cheapest stage without them.
 identity = ["insightface>=0.7", "onnxruntime>=1.17"]   # stage C — face re-id
 vlm = ["anthropic>=0.40"]                               # stage F — descriptions
+# Search plan Phase 6 — meaning-based search. The upper bounds are the installed
+# torch, not caution: transformers 5.x needs torch>=2.4 and ultralytics brings
+# 2.2, so an unpinned resolve imports fine and then fails at the first model
+# load. Raise both together, after checking `torch.__version__`.
+semantic = ["sentence-transformers>=3,<4", "transformers>=4.41,<5"]
 dev = ["ruff>=0.6"]
-all = ["insightface>=0.7", "onnxruntime>=1.17", "anthropic>=0.40"]
+all = ["insightface>=0.7", "onnxruntime>=1.17", "anthropic>=0.40",
+       "sentence-transformers>=3,<4", "transformers>=4.41,<5"]
 
 [project.urls]
 Homepage = "https://github.com/Infinex-Labs/Intelligence-OS"

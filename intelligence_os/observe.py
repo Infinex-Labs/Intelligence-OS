@@ -68,7 +68,11 @@ class Observer:
         self.cooldown = CONFIG.trigger.observation_cooldown_seconds
         # register the few structural predicates the deterministic translator uses
         store.register_predicate("present", subject_type="any", object_type="none")
-        store.register_predicate("near", subject_type="person", object_type="object")
+        # object_type is "any", not "object": the thing a person is near may be a
+        # dog or a van, not only furniture. `near` stays one predicate because it
+        # states one observed fact — proximity. What that proximity *means* is the
+        # distiller's call, and it picks a different verb per kind (distill.py).
+        store.register_predicate("near", subject_type="person", object_type="any")
 
     def _cooled(self, subject: str, predicate: str, object_id: Optional[str],
                ts: float) -> bool:
@@ -77,11 +81,11 @@ class Observer:
 
     def observe_frame(self, resolved: list[ResolvedDetection], timestamp: float,
                      source_ref: Optional[str] = None) -> list[str]:
-        """Emit 'present' for every entity and 'near' for each person-object pair
-        in proximity. Cooldown suppresses repeats of the same situation."""
+        """Emit 'present' for every entity and 'near' for each person↔non-person
+        pair in proximity. Cooldown suppresses repeats of the same situation."""
         ids: list[str] = []
         people = [r for r in resolved if r.det.cls_name == "person"]
-        objects = [r for r in resolved if r.det.cls_name != "person"]
+        others = [r for r in resolved if r.det.cls_name != "person"]
 
         for r in resolved:
             if self._cooled(r.entity_id, "present", None, timestamp):
@@ -93,7 +97,7 @@ class Observer:
                 camera_id=r.camera_id))
 
         for p in people:
-            for o in objects:
+            for o in others:
                 iou = _iou(p.det.bbox, o.det.bbox)
                 dist = _center_dist_norm(p.det.bbox, o.det.bbox)
                 if iou < self.near_iou and dist > self.near_dist:

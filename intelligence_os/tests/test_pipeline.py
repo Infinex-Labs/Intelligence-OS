@@ -100,10 +100,20 @@ def test_pipeline():
     frequents = [r for r in store.relations(kind="relation") if r["predicate"] == "frequents"]
     check("raj 'frequents' desk mined", any(r["subject_entity_id"] == person for r in frequents))
 
-    # habit: present around 09h
+    # habit: present around the hour raj turns up. Asked for rather than written
+    # as "09h", because Phase 5 cuts habit buckets on the deployment's clock —
+    # the literal was only ever right in UTC, and a test that passes in CI and
+    # fails on a laptop is testing the timezone, not the miner.
+    from intelligence_os.distill import bucket_hour
+    hour = f"{bucket_hour(base + 9 * 3600):02d}h"
     habits = store.relations(kind="habit")
-    check("daily 09h presence mined as a habit",
-          any("09h" in h["predicate"] for h in habits))
+    check(f"daily {hour} presence mined as a habit",
+          any(h["predicate"] == f"present_around_{hour}" for h in habits))
+    # ...and the same pattern at weekday granularity, which is what makes
+    # "does he come in on Tuesdays?" a question with an answer (Phase 5, G8).
+    check("the same presence also mined per weekday",
+          any(h["predicate"].startswith("present_")
+              and h["predicate"].endswith(f"_around_{hour}") for h in habits))
 
     store.close()
 

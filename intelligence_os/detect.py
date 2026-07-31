@@ -5,6 +5,12 @@ YOLO detects persons + configured object classes on motion frames. A tracker
 appearance embedding + location prior re-matches it across days (location prior is
 acceptable for objects — they're static — but is NEVER used for people, §C / NFR-7).
 
+Animals and vehicles are detectable classes too, and they break the "static"
+premise that cross-day re-matching rests on. They are therefore treated like
+people: tracked within a stream, never re-matched across restarts. Two sightings
+of a dog on different days are two entities, which under-claims rather than
+asserting they were the same dog (config.ANIMATE_KINDS).
+
 Objects become entities too, and are mergeable/splittable like people.
 """
 from __future__ import annotations
@@ -15,7 +21,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .config import CONFIG
+from .config import ANIMATE_KINDS, CONFIG, kind_for_class
 from .store import Store
 
 
@@ -86,10 +92,15 @@ class Detector:
                 continue
             x1, y1, x2, y2 = [int(v) for v in b.xyxy[0].cpu().tolist()]
             crop = frame_bgr[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+            # Only static things carry an appearance vector. For anything animate
+            # the histogram cannot tell two same-coloured subjects apart, and
+            # re-matching on it would fabricate a shared identity (ANIMATE_KINDS).
+            # People already worked this way; animals and vehicles now join them.
+            animate = kind_for_class(cls_name) in ANIMATE_KINDS
             out.append(Detection(
                 cls_name=cls_name, bbox=(x1, y1, x2, y2), conf=float(b.conf),
                 track_id=tid,
-                appearance=_appearance_signature(crop) if cls_name != "person" else None,
+                appearance=None if animate else _appearance_signature(crop),
             ))
         return out
 

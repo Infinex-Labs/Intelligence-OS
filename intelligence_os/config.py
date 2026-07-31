@@ -32,6 +32,22 @@ DB_PATH = Path(os.environ.get("INTELLIGENCE_OS_DB", DATA_DIR / "memory.db"))
 FRAMES_DIR = DATA_DIR / "frames"   # retained keyframes/crops for audit (NFR retention)
 
 
+def retained_keyframe(source_ref) -> "str | None":
+    """Basename of a still-on-disk keyframe, or None if retention reclaimed it.
+
+    Retention (§11) deletes raw frames after `raw_retention_days` but keeps the
+    observations — the claim outlives the picture, on purpose. So an old row's
+    `source_ref` names a file that is gone, and anything that hands that name to
+    a client produces a broken image. Callers check here before advertising it.
+
+    None means retention worked, not that something failed.
+    """
+    if not source_ref:
+        return None
+    name = os.path.basename(str(source_ref))
+    return name if (FRAMES_DIR / name).exists() else None
+
+
 def resolve_yolo_weights() -> str:
     """§10 model weights: fetch on first run, never bake in. Precedence:
     INTELLIGENCE_OS_YOLO env > a local checkout copy (dev keeps it, gitignored) >
@@ -87,6 +103,72 @@ class TriggerConfig:
     sensitivity: str = "lazy"
 
 
+# --- Detection vocabulary ----------------------------------------------------
+# The 80 COCO classes the shipped YOLO weights carry, in model order. Kept here
+# rather than read off the model so `object_classes` can be validated at config
+# load time, before ultralytics is imported (and without a GPU spin-up).
+COCO_CLASSES: tuple[str, ...] = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+)
+
+# Kind of thing each class is. This is NOT `entities.type` — that column is
+# CHECK-constrained to person|object and widening it means rebuilding the table.
+# Kind is the behavioural discriminator: it picks the relation verb the distiller
+# may assert, and decides whether cross-day appearance re-ID is honest for the
+# class (see ANIMATE_KINDS below).
+_ANIMALS = frozenset({"bird", "cat", "dog", "horse", "sheep", "cow",
+                      "elephant", "bear", "zebra", "giraffe"})
+_VEHICLES = frozenset({"bicycle", "car", "motorcycle", "airplane", "bus",
+                       "train", "truck", "boat"})
+
+# Kinds that move under their own power (or someone else's). The appearance
+# signature is an HS colour histogram, which separates a red chair from a blue
+# one but NOT one black dog from another, and its cross-day use rests on an
+# assumption stated in detect.py: objects are static. That assumption is false
+# for these, so re-matching them across restarts would merge distinct subjects
+# into one entity — asserting an identity nothing observed. We mint instead.
+ANIMATE_KINDS: frozenset[str] = frozenset({"person", "animal", "vehicle"})
+
+
+def kind_for_class(cls_name: str) -> str:
+    """person | animal | vehicle | object for a COCO class name."""
+    if cls_name == "person":
+        return "person"
+    if cls_name in _ANIMALS:
+        return "animal"
+    if cls_name in _VEHICLES:
+        return "vehicle"
+    return "object"
+
+
+def normalize_object_classes(names) -> tuple[list[str], list[str]]:
+    """(kept, rejected) for a user-supplied class list.
+
+    A class the model does not carry can never be detected, so a typo like 'dogs'
+    would silently watch nothing. Same failure the rule compiler refuses loudly
+    for (§9.2) — the caller surfaces `rejected` rather than dropping it.
+    """
+    kept, rejected, seen = [], [], set()
+    for raw in names or []:
+        n = str(raw).strip().lower()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        (kept if n in COCO_CLASSES else rejected).append(n)
+    return kept, rejected
+
+
 @dataclass
 class DetectConfig:
     yolo_weights: str = field(default_factory=resolve_yolo_weights)
@@ -94,6 +176,7 @@ class DetectConfig:
     iou: float = 0.5
     # COCO classes we treat as "objects of interest" (tracked classes, §B).
     # Everything else relies on the VLM describer for open-vocabulary naming.
+    # Overridable from config.yaml (`object_classes:`) — see apply_app_config.
     object_classes: list[str] = field(default_factory=lambda: [
         "chair", "laptop", "cell phone", "bottle", "cup", "book",
         "backpack", "handbag", "potted plant", "tv", "couch", "bed",
@@ -114,6 +197,199 @@ class DistillConfig:
     # run it on a short timer so the world-graph fills in visibly. 0 = off.
     # ponytail: fixed interval; switch to change-triggered if a pass gets slow.
     live_interval_s: float = 60.0
+    # How far back a mining pass reads (days; 0 = all of history). A nightly job
+    # that scans everything gets slower every night forever, and the extra it
+    # reads is history whose edges it already mined. Measured back from the
+    # newest observation rather than the wall clock, so a memory that was idle
+    # over the weekend still mines the week it actually has.
+    mine_window_days: float = 120.0
+
+
+@dataclass
+class SemanticConfig:
+    """Meaning-based retrieval (search plan Phase 6).
+
+    Optional in the same sense `insightface` is: with no local embedding model
+    installed the layer produces nothing and search is exactly Phase 2's lexical
+    behaviour. Nothing here downgrades an answer that already worked — semantic
+    hits are FUSED with the lexical ones, never substituted for them.
+    """
+    # The master switch, separate from whether the model is installed. It exists
+    # so a deployment that dislikes what this layer surfaces can turn it off in
+    # config rather than uninstalling a package or rolling back a release.
+    #
+    # The env var is how "does this still work without the dependency?" gets
+    # answered on a machine that HAS the dependency. That question needs a real
+    # answer on every run rather than once, on a laptop, by uninstalling things
+    # — which is a check nobody repeats.
+    enabled: bool = not os.environ.get("INTELLIGENCE_OS_NO_SEMANTIC")
+    # Named, not just loaded: the name is stored beside every vector, so a model
+    # swap is detectable rather than silently mixing two incompatible spaces in
+    # one index.
+    #
+    # L12 rather than the smaller L6, and rather than a stronger retrieval model
+    # like bge-small, because this index has to do something most benchmarks do
+    # not measure: SAY NO. Measured on the eval corpus (docs/search-baseline.md):
+    #
+    #   model      worst true hit   best score for 'dog', which is not there
+    #   L6                  0.276                                      0.248
+    #   L12                 0.375                                      0.233
+    #   bge-small           0.521                                      0.494
+    #
+    # L6 puts a real answer and pure noise 0.03 apart, so no floor separates
+    # them. bge scores everything highly — it is trained to RANK, and a ranker
+    # asked for an absolute yes/no has nothing to give. L12 leaves a gap wide
+    # enough to put a threshold in, for ~120MB instead of ~90MB.
+    model: str = "sentence-transformers/all-MiniLM-L12-v2"
+    # Cosine below this is not a match, and this is the one score in the system
+    # that is ALLOWED to gate. bm25 only ever orders results, because its
+    # magnitude is relative to the corpus and says nothing on its own. Cosine is
+    # absolute and comparable across queries, so without a floor every question
+    # returns the nearest row in the memory whether or not anything answers it —
+    # which is how a semantic layer invents evidence.
+    #
+    # 0.30 sits in the middle of the gap in the table above. It is a property of
+    # the model, not of this corpus: change the model and re-measure, which is
+    # what `model` being a stored column is for.
+    min_similarity: float = 0.30
+    # How many semantically-ranked rows enter the fusion.
+    top_k: int = 200
+    # RRF's rank offset, the constant from the original paper. Deliberately not
+    # tuned: its job is to flatten the gap between rank 1 and rank 2 enough that
+    # neither list can dominate the other off a single confident hit, and a
+    # value fitted to this corpus would stop doing that on someone else's.
+    rrf_k: float = 60.0
+    # Rows about the same subject and predicate closer together than this are one
+    # hit, not several. A settled scene re-described every few seconds otherwise
+    # fills an answer with the same sentence, and the count reads as recurrence.
+    collapse_seconds: float = 120.0
+    # Rows handed to the encoder per call, and vectors held in memory per chunk
+    # while scanning. Both are bounded on purpose: an embedding is 1.5KB and a
+    # year of prose is not something to load in one list.
+    batch_size: int = 128
+    scan_chunk: int = 4096
+    # Keyframes shown per entity. Chosen for time coverage rather than by taking
+    # the first `n` — see `ask._diverse_keyframes`.
+    max_keyframes: int = 4
+
+
+@dataclass
+class ReflectionConfig:
+    """The relaxation ladder (search plan Phase 7).
+
+    Empty used to be final, which made "I could not find it" and "it did not
+    happen" the same reply — the worst failure this system has, because it is
+    invisible. When a question comes back with nothing, the ladder loosens ONE
+    constraint at a time, retries, and stops at the first result.
+
+    Three rules keep it from relaxing its way into inventing an answer:
+
+      it only ever runs on an EMPTY result, so a question that was answered is
+      bit-for-bit unchanged;
+
+      it only loosens constraints that RESOLVED to something memory knows — a
+      zone that exists, a label that names a real subject. Dropping a filter
+      that named nothing is not widening the search, it is abandoning it, and
+      that is how "was Mallory here?" would come back with a photograph of
+      somebody else;
+
+      it never touches an exclusion. "Anyone except the courier" is a
+      constraint on the answer, and widening is allowed to add candidates,
+      never to overrule what was ruled out.
+
+    Everything it does is recorded in the trace and disclosed in the prose.
+    """
+    # As with the semantic layer: an env kill switch, so "does this still
+    # behave like Phase 6?" is answered on every run rather than by reasoning
+    # about it. With this off, a dead end is a dead end again.
+    enabled: bool = not os.environ.get("INTELLIGENCE_OS_NO_RELAX")
+    # At most this many rungs are tried. A ladder with no top is a search that
+    # eventually returns the whole table and calls it an answer.
+    max_steps: int = 3
+    # Window widening, per side. The multiplier is what makes "a bit either
+    # side" mean something for a six-hour question; the cap is what stops it
+    # meaning something absurd for a six-WEEK one. Without the cap, a question
+    # about last month widens by a fortnight and answers about a different
+    # month — and "was anyone there next week?" quietly reaches back into
+    # everything ever recorded. It is the cap, not the multiplier, that makes
+    # the true-negative guard hold by construction.
+    widen_factor: float = 1.5
+    widen_cap_s: float = 6 * 3600.0
+
+
+@dataclass
+class VisualConfig:
+    """Visual re-ranking over stored keyframes (search plan Phase 8).
+
+    The phase was specified as a third recall index: CLIP vectors over
+    keyframes, fused alongside the lexical and semantic lists, so that "the red
+    van" could be found in a memory where nobody wrote the words down. It is
+    NOT built that way, and the reason is a measurement rather than a
+    preference.
+
+    A recall index must be able to say NO. Every other index here can. bm25
+    returns nothing when no term matches; the semantic layer has `min_similarity`
+    under it, chosen in Phase 6 precisely so a question with no answer gets one.
+    CLIP, measured on this system's own 84 retained frames — a dim indoor room
+    with a dog on a sofa, a laptop on a table, people in white — cannot:
+
+        query                        best frame scores        actually there?
+        white wireless earbuds                   0.929                    yes
+        a laptop computer                        0.803                    yes
+        a dog                                    0.433                    yes
+        a dark wooden panel                      0.110                    yes
+        a hospital bed                           0.953                     NO
+        a suitcase                               0.842                     NO
+        a cardboard box                          0.729                     NO
+        snow on the ground                       0.399                     NO
+
+    (Zero-shot probability against a 20-prompt bank, which is the calibration
+    that separates BEST. Raw cosine and margin-over-median are both worse; "a
+    photo of {}" and "a security camera photo of {}" templating changes nothing.
+    12 present probes against 61 absent ones.)
+
+    There is no threshold in that. "A hospital bed" outscores nine of the twelve
+    things genuinely in frame. At 0.90, where recall has already fallen to a
+    third, false positives remain. The distributions do not overlap slightly at
+    the edges — they interleave across the whole range, because a CLIP score is
+    a statement about the closest thing in a fixed vocabulary, not about whether
+    the memory contains it.
+
+    An ungated recall index would therefore answer "was there a red van?" with a
+    photograph of somebody in a white shirt — evidence, complete with a picture,
+    for a thing that never happened. It would also make every empty result
+    non-empty, which quietly repeals Phase 7: the ladder can only report a dead
+    end that is allowed to exist.
+
+    So what is built is the half the measurement supports. CLIP RANKS well here
+    (`a laptop computer` -> rank 1 of 84, `white wireless earbuds` -> 1 of 84,
+    `a dog` -> 2 of 84), and ranking is safe when something else has already
+    vouched for the row. Visual may reorder candidates the lexical or semantic
+    index retrieved; it may never introduce one. That is a narrowing of Phase
+    6's rule, not an exception to it: fusion only ever adds, and this only ever
+    reorders.
+    """
+    # OFF by default, as the plan required of this phase if it was built at all
+    # — and one variable rather than two, so its absence IS the off position and
+    # there is no state where the switch and the config disagree.
+    enabled: bool = bool(os.environ.get("INTELLIGENCE_OS_VISUAL"))
+    # CLIP's joint image/text space. Stored in the `model` column beside every
+    # vector like the semantic index's is, and the reason matters more here:
+    # these vectors are NOT comparable with the semantic ones. A CLIP keyframe
+    # vector may only ever be dotted with a CLIP TEXT vector, so the query
+    # encoder is this model's text tower and not MiniLM.
+    model: str = "clip-ViT-B-32"
+    # What agreeing with the ranked list is worth. Expressed in RRF's own terms:
+    # a visual agreement contributes `weight / (rrf_k + visual_rank)`, the same
+    # shape as a list contributes, so a re-rank cannot outvote the two indexes
+    # that actually found the row unless they disagree with each other.
+    weight: float = 0.5
+    # How many of the already-retrieved candidates get re-ranked. Re-ranking is
+    # a forward pass per DISTINCT keyframe, so this bounds the cost of a broad
+    # question in images decoded rather than in rows scanned.
+    top_k: int = 50
+    batch_size: int = 32
+    scan_chunk: int = 4096
 
 
 @dataclass
@@ -132,6 +408,9 @@ class Config:
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
     distill: DistillConfig = field(default_factory=DistillConfig)
+    semantic: SemanticConfig = field(default_factory=SemanticConfig)
+    reflect: ReflectionConfig = field(default_factory=ReflectionConfig)
+    visual: VisualConfig = field(default_factory=VisualConfig)
     vlm: VLMConfig = field(default_factory=VLMConfig)
     # Retention: drop raw frames/crops older than this many days (§11).
     raw_retention_days: int = 7
@@ -172,6 +451,34 @@ def apply_app_config(cfg: dict | None = None) -> None:
         CONFIG.raw_retention_days = int(cfg["retention_days"])
     if "face_matching" in cfg:
         CONFIG.identity.enabled = bool(cfg["face_matching"])
+    if "semantic_search" in cfg:
+        # A kill switch that does not need a redeploy. Turning it off leaves the
+        # stored vectors alone, so turning it back on costs nothing — the point
+        # is to stop *reading* them, not to throw the index away.
+        CONFIG.semantic.enabled = bool(cfg["semantic_search"])
+    if "widen_empty_searches" in cfg:
+        # Off means a question that matches nothing answers "nothing", full
+        # stop. Some deployments want exactly that: a loosened answer is a
+        # correct answer to a question nobody asked, and disclosure is only
+        # worth something if somebody reads it.
+        CONFIG.reflect.enabled = bool(cfg["widen_empty_searches"])
+    if "visual_reranking" in cfg:
+        # Opt-in, and it buys ORDER rather than reach: the same rows come back,
+        # with the ones whose picture matches the words first. It cannot widen
+        # an answer, so switching it on cannot make a question find something
+        # new — see `VisualConfig` for the measurement that settled that.
+        CONFIG.visual.enabled = bool(cfg["visual_reranking"])
+    if "object_classes" in cfg:
+        # An empty/absent list means "keep the defaults"; an explicit list wins.
+        # `person` is always detected and is not part of this list (detect.py adds
+        # it), so silently drop it rather than let it look like a togglable class.
+        kept, rejected = normalize_object_classes(cfg["object_classes"])
+        if rejected:
+            print(f"[config] ignoring unknown detection class(es): "
+                  f"{', '.join(rejected)} — not in the model's 80 COCO classes")
+        kept = [c for c in kept if c != "person"]
+        if kept:
+            CONFIG.detect.object_classes = kept
 
 
 def resolve_cameras(app_config: dict | None = None) -> list[dict]:

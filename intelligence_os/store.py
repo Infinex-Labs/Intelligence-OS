@@ -12,12 +12,14 @@ Schema (one DB, SQLite for the POC -> Postgres/graph at scale):
   scene_snapshots   per-location inventory over time
   relations         distilled, weighted, decaying, auditable edges (relation|habit|event)
   predicate_schema  legal (subject_type, predicate, object_type) triples (grows over time)
+  obs_fts/desc_fts  FTS5 indexes over the `text` columns; derived, rebuildable
 """
 from __future__ import annotations
 
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -37,6 +39,20 @@ def _uid(prefix: str) -> str:
 
 def now() -> float:
     return time.time()
+
+
+# Search plan Phase 1. Some facts have no owner: an open gate, a spill, a stack
+# of pallets. The old write path had one option — pin them on the first person in
+# frame — which reads as a claim about that person. These get a subject of their
+# own instead, named for the place, so the fact stays queryable without inventing
+# an entity or libelling a bystander.
+SCENE_PREFIX = "scene:"
+
+
+def scene_subject(location_id: Optional[str] = None,
+                  camera_id: Optional[str] = None) -> str:
+    """Subject id for an unowned fact. Prefers the zone; falls back to the camera."""
+    return SCENE_PREFIX + (location_id or camera_id or "unknown")
 
 
 SCHEMA = """
@@ -183,8 +199,56 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_obs_subject ON observations(subject_entity_id);
-CREATE INDEX IF NOT EXISTS idx_obs_time    ON observations(timestamp);
+-- Search plan Phase 1: the COMPLETE vision-model report, kept verbatim.
+-- Until this table existed, `SceneDescription.states()` picked three of the four
+-- sections it returns and the rest was dropped before the insert — an open gate
+-- was seen, described, and then deleted. `raw` is the report as JSON so nothing
+-- is lost even if the flattening rules change later; `text` is the flattened
+-- prose, which is the surface the lexical and semantic indexes are built on.
+CREATE TABLE IF NOT EXISTS scene_descriptions (
+    description_id TEXT PRIMARY KEY,
+    camera_id      TEXT,
+    location_id    TEXT,
+    timestamp      REAL NOT NULL,
+    source_ref     TEXT,            -- keyframe, for provenance
+    model          TEXT NOT NULL,   -- which VLM produced it
+    raw            TEXT NOT NULL,   -- the whole report, verbatim JSON
+    text           TEXT NOT NULL    -- flattened prose
+);
+
+-- Search plan Phase 6: the semantic index. One vector per piece of prose, in
+-- the same float32-blob convention `signatures` already uses — there is no
+-- second serialisation format in this system and there should not be.
+--
+-- `model` is a column rather than an assumption because two models produce two
+-- incompatible spaces, and a cosine between them is a number with no meaning.
+-- Recording it makes a model swap a thing that can be detected and re-indexed
+-- instead of a silent collapse in answer quality.
+--
+-- UNIQUE(kind, ref_id, model) is what makes the backfill idempotent: it is a
+-- batch job that will be interrupted, re-run, and run again by the nightly
+-- pass, and without this each run would add another copy of every vector and
+-- quietly weight those rows higher in the scan.
+CREATE TABLE IF NOT EXISTS text_embeddings (
+    embedding_id TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,   -- observation | description
+    ref_id       TEXT NOT NULL,
+    dim          INTEGER NOT NULL,
+    vec          BLOB NOT NULL,   -- float32, L2-normalised
+    model        TEXT NOT NULL,
+    created_at   REAL NOT NULL,
+    UNIQUE(kind, ref_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_txtemb_ref ON text_embeddings(kind, ref_id);
+
+-- Search plan Phase 3: the two shapes every question has. A question is a time
+-- window, optionally narrowed to a place; a profile is one subject over time.
+-- Both composites lead with the column the older single-column indexes covered
+-- (`_migrate_v7_pushdown` drops those as redundant), so nothing that used them
+-- loses its index — the second column just saves the row lookup.
+CREATE INDEX IF NOT EXISTS idx_obs_time_loc  ON observations(timestamp, location_id);
+CREATE INDEX IF NOT EXISTS idx_obs_subj_time ON observations(subject_entity_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_desc_time   ON scene_descriptions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sig_entity  ON signatures(entity_id);
 CREATE INDEX IF NOT EXISTS idx_snap_loc    ON scene_snapshots(location_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_rel_subject ON relations(subject_entity_id);
@@ -223,6 +287,9 @@ class Store:
         self._migrate_m7()
         self._migrate_m9()
         self._migrate_v4()
+        self._migrate_v5_search()
+        self._migrate_v6_fts()
+        self._migrate_v7_pushdown()
         self.conn.commit()
 
     def close(self) -> None:
@@ -290,6 +357,405 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS idx_obs_status ON observations(status)")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_v5_search(self) -> None:
+        """Search plan Phase 1: link each row back to the full report it came
+        from, and give it a human-readable `text`.
+
+        `predicate` stays exactly what it was — the machine contract that rules
+        and distillation match on. `text` is the search surface, so rewording a
+        row for searchability can never break a rule.
+        """
+        for stmt in (
+            "ALTER TABLE observations ADD COLUMN description_id TEXT",
+            "ALTER TABLE observations ADD COLUMN text TEXT",
+        ):
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        try:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_obs_desc ON observations(description_id)")
+        except sqlite3.OperationalError:
+            pass
+
+    def _migrate_v7_pushdown(self) -> None:
+        """Retire the two single-column observation indexes the composites cover.
+
+        `idx_obs_time` and `idx_obs_subject` are exact leading-column prefixes of
+        `idx_obs_time_loc` and `idx_obs_subj_time`, so every query they served is
+        still indexed. Keeping them would cost two extra B-tree writes on every
+        observation insert — and the write path runs per frame, per camera, all
+        day, which is the one place in this system where that is not free.
+        """
+        for name in ("idx_obs_time", "idx_obs_subject"):
+            try:
+                self.conn.execute(f"DROP INDEX IF EXISTS {name}")
+            except sqlite3.OperationalError:
+                pass
+
+    # --- full-text index (search plan Phase 2) -------------------------------
+    #
+    # External-content FTS5 over the `text` columns Phase 1 added: the index
+    # holds no copy of the data, only the term postings, and the triggers below
+    # keep it in step with the base table.
+    #
+    # `porter unicode61` is the whole point — "cigarettes" has to find "having a
+    # cigarette", which a substring test never can. What is deliberately NOT
+    # indexed: entity labels and zone names. They are structured fields with
+    # their own filters, and indexing them would let a renamed entity leave a
+    # stale string in the index and let a name rank a row the structured filter
+    # had already excluded.
+    _FTS_SPECS = (
+        ("obs_fts", "observations", "text"),
+        ("desc_fts", "scene_descriptions", "text"),
+    )
+
+    def _migrate_v6_fts(self) -> None:
+        """Build the lexical index, or record that this build cannot.
+
+        FTS5 is compiled into every SQLite we ship on, but "every build we ship
+        on" is not "every build that exists" — a source build with
+        -DSQLITE_OMIT_FTS5 would otherwise turn a search into a crash. When it is
+        missing we set `fts_enabled = False` and callers fall back to the
+        substring matching that has always been there: worse recall, still
+        answers.
+        """
+        self.fts_enabled = False
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
+            self.conn.execute("DROP TABLE _fts_probe")
+        except sqlite3.OperationalError:
+            return
+
+        for fts, base, col in self._FTS_SPECS:
+            existed = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name=?", (fts,)).fetchone()
+            self.conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5("
+                f"{col}, content='{base}', content_rowid='rowid', "
+                f"tokenize='porter unicode61')")
+            for stmt in (
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ai AFTER INSERT ON {base} BEGIN "
+                f"  INSERT INTO {fts}(rowid, {col}) VALUES (new.rowid, new.{col}); END",
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ad AFTER DELETE ON {base} BEGIN "
+                f"  INSERT INTO {fts}({fts}, rowid, {col}) "
+                f"  VALUES ('delete', old.rowid, old.{col}); END",
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_au AFTER UPDATE ON {base} BEGIN "
+                f"  INSERT INTO {fts}({fts}, rowid, {col}) "
+                f"  VALUES ('delete', old.rowid, old.{col}); "
+                f"  INSERT INTO {fts}(rowid, {col}) VALUES (new.rowid, new.{col}); END",
+            ):
+                self.conn.execute(stmt)
+            if not existed:
+                # First time only. Backfills every row written before the index
+                # existed; on an already-indexed database it would be a full
+                # re-tokenise of the table for no gain.
+                self.conn.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+        self.fts_enabled = True
+
+    def reindex_text(self) -> None:
+        """Rebuild both indexes from the base tables. Not called on the hot path
+        — it exists for the case where a database was edited behind the triggers'
+        back (a restore, a manual UPDATE with triggers off)."""
+        if not self.fts_enabled:
+            return
+        with self.tx() as c:
+            for fts, _base, _col in self._FTS_SPECS:
+                c.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+
+    # A query is not FTS5 syntax and must never be treated as it: a stray quote
+    # or `*` from a user's question would be a syntax error, and `NOT`/`OR` typed
+    # in English would silently become operators. Terms are extracted and quoted
+    # individually, so the only operator in play is the implicit AND between them.
+    _FTS_STOPWORDS = frozenset({
+        "a", "an", "and", "the", "of", "to", "in", "on", "at", "is", "was",
+        "were", "are", "be", "been", "it", "its", "with", "for", "by", "any",
+        "anyone", "anything", "there", "that", "this",
+    })
+
+    @classmethod
+    def fts_query(cls, text: str) -> Optional[str]:
+        """A user's words as a safe FTS5 MATCH expression, or None if empty.
+
+        Stopwords are dropped rather than required: the corpus stores "on phone"
+        and the question asks "on the phone", so demanding every typed word would
+        fail on the one word carrying no meaning. If a query is *nothing but*
+        stopwords the words are kept — better a narrow match than matching the
+        whole table.
+        """
+        terms = re.findall(r"\w+", (text or "").lower())
+        if not terms:
+            return None
+        kept = [t for t in terms if t not in cls._FTS_STOPWORDS] or terms
+        return " ".join(f'"{t}"' for t in kept)
+
+    def search_text(self, query: str, *, since: Optional[float] = None,
+                    until: Optional[float] = None,
+                    location_ids: Optional[Sequence[str]] = None,
+                    camera_ids: Optional[Sequence[str]] = None,
+                    entity_ids: Optional[Sequence[str]] = None,
+                    limit: int = 500) -> list[sqlite3.Row]:
+        """Observations whose `text` matches, best first, filtered in one statement.
+
+        The filters are in the SQL rather than applied after, so a narrow window
+        over a large memory never materialises the rows outside it. `score` is
+        bm25 negated: SQLite returns it smaller-is-better, and a score that grows
+        with relevance is the one every caller expects.
+
+        Every filter the caller will apply later belongs here, not after: `limit`
+        cuts the ranked list, so a shortlist drawn from the whole memory and
+        *then* narrowed to one person is shorter than one drawn from that person
+        to begin with. Filtering afterwards would quietly cost recall on exactly
+        the narrow questions the filters were added to serve.
+        """
+        match = self.fts_query(query) if self.fts_enabled else None
+        if match is None:
+            return []
+        q = ["SELECT o.*, -bm25(obs_fts) AS score FROM obs_fts "
+             "JOIN observations o ON o.rowid = obs_fts.rowid "
+             "WHERE obs_fts MATCH ?"]
+        args: list = [match]
+        if since is not None:
+            q.append("AND o.timestamp>=?"); args.append(since)
+        if until is not None:
+            q.append("AND o.timestamp<=?"); args.append(until)
+        # Same convention as `_obs_where`: None is no filter, an empty sequence
+        # is a filter nothing satisfies. The two must agree, because the same
+        # plan feeds both — a zone list that resolved to nothing must not return
+        # the whole ranked memory from one of them and no rows from the other.
+        for col, values in (("location_id", location_ids),
+                            ("camera_id", camera_ids),
+                            ("subject_entity_id", entity_ids)):
+            if values is None:
+                continue
+            if not values:
+                return []
+            q.append(f"AND o.{col} IN ({','.join('?' * len(values))})")
+            args.extend(values)
+        q.append("ORDER BY score DESC LIMIT ?"); args.append(limit)
+        try:
+            return self.conn.execute(" ".join(q), args).fetchall()
+        except sqlite3.OperationalError:
+            return []      # malformed MATCH: no answer, never a 500
+
+    def search_descriptions(self, query: str, *, since: Optional[float] = None,
+                            until: Optional[float] = None,
+                            limit: int = 100) -> list[sqlite3.Row]:
+        """The same search over whole VLM reports rather than the rows split out
+        of them — for provenance ("what else did that frame say?")."""
+        match = self.fts_query(query) if self.fts_enabled else None
+        if match is None:
+            return []
+        q = ["SELECT d.*, -bm25(desc_fts) AS score FROM desc_fts "
+             "JOIN scene_descriptions d ON d.rowid = desc_fts.rowid "
+             "WHERE desc_fts MATCH ?"]
+        args: list = [match]
+        if since is not None:
+            q.append("AND d.timestamp>=?"); args.append(since)
+        if until is not None:
+            q.append("AND d.timestamp<=?"); args.append(until)
+        q.append("ORDER BY score DESC LIMIT ?"); args.append(limit)
+        try:
+            return self.conn.execute(" ".join(q), args).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+    # --- the semantic index (search plan Phase 6) ----------------------------
+    #
+    # The lexical index above is a table SQLite maintains; this one is a table we
+    # maintain, and the difference is where the work happens. FTS5 tokenises
+    # inside a trigger, on the writing thread, in microseconds. An embedding
+    # costs milliseconds of matrix multiply, and the write path here runs per
+    # frame, per camera, all day — so vectors are produced by a batch pass
+    # (`semantic.backfill`, called from distillation) rather than on insert.
+    #
+    # What that buys and what it costs: the write path stays exactly as fast as
+    # it was and cannot be taken down by a model that fails to load, and in
+    # exchange a row is lexically searchable immediately but semantically
+    # searchable one distillation tick later. That is the same lag the mined
+    # habits already have, and it is stated in the docs rather than hidden.
+
+    EMBED_OBSERVATION = "observation"
+    # Search plan Phase 8. A CLIP vector for the picture an observation cited,
+    # stored under the OBSERVATION's id rather than the file's, so re-ranking is
+    # a lookup on the ids already in hand instead of a second join back through
+    # `source_ref`. One image cited by six rows is encoded once and written six
+    # times: ~2KB apiece against a forward pass apiece, which is the cheap side
+    # of that trade by three orders of magnitude.
+    #
+    # These vectors share a table with the semantic ones and NOT a space. The
+    # `model` column is what keeps them apart, and every read here filters on it.
+    EMBED_KEYFRAME = "keyframe"
+
+    def add_embeddings(self, kind: str, model: str,
+                       rows: Sequence[tuple[str, "np.ndarray"]]) -> int:
+        """Store `[(ref_id, vector)]`, replacing any vector already held.
+
+        `ON CONFLICT ... DO UPDATE` rather than `INSERT OR IGNORE`, because the
+        one time a ref is re-embedded under the same model name is when the
+        encoder behind that name changed — a stub swapped for the real thing, a
+        library upgrade — and keeping the old vector would leave a row that
+        answers to a space nothing else is in.
+        """
+        payload = [
+            (_uid("emb"), kind, ref_id, int(np.asarray(vec).shape[-1]),
+             self._pack(vec), model, now())
+            for ref_id, vec in rows
+        ]
+        if not payload:
+            return 0
+        with self.tx() as c:
+            c.executemany(
+                "INSERT INTO text_embeddings(embedding_id,kind,ref_id,dim,vec,"
+                "model,created_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(kind,ref_id,model) DO UPDATE SET "
+                "vec=excluded.vec, dim=excluded.dim, created_at=excluded.created_at",
+                payload)
+        return len(payload)
+
+    def embedded_count(self, kind: str, model: str) -> int:
+        """How many vectors this model has here. The cheap gate on the query
+        path: with none, there is nothing for a semantic search to search, and
+        loading an encoder to discover that would cost seconds per question."""
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM text_embeddings WHERE kind=? AND model=?",
+            (kind, model)).fetchone()["c"]
+
+    def embedding_backlog(self, model: str, *, limit: int = 512) -> list[sqlite3.Row]:
+        """Observations that carry prose and have no vector for this model.
+
+        `text IS NOT NULL` is the whole selection rule, and it is what keeps this
+        affordable: only vision-model rows carry prose. A detector's `present` is
+        a structured fact with a structured filter already on it, and embedding
+        the word "present" a million times would index noise at the exact scale
+        where scanning it hurts.
+        """
+        return self.conn.execute(
+            "SELECT observation_id, text FROM observations o "
+            "WHERE o.text IS NOT NULL AND o.text<>'' AND NOT EXISTS ("
+            "  SELECT 1 FROM text_embeddings e WHERE e.kind=? AND e.model=? "
+            "    AND e.ref_id=o.observation_id) "
+            "ORDER BY o.timestamp DESC LIMIT ?",
+            (self.EMBED_OBSERVATION, model, limit)).fetchall()
+
+    def embedded_chunks(self, model: str, *, since: Optional[float] = None,
+                        until: Optional[float] = None,
+                        location_ids: Optional[Sequence[str]] = None,
+                        camera_ids: Optional[Sequence[str]] = None,
+                        entity_ids: Optional[Sequence[str]] = None,
+                        chunk: int = 4096):
+        """Yield `(ref_ids, matrix)` for embedded rows passing the hard filters.
+
+        Streamed rather than returned, so the caller's memory is bounded by the
+        chunk and its top-k instead of by how much prose the memory holds. The
+        exactness is not traded away for that: the caller keeps a running best-k
+        across chunks, which is the same answer a single pass would give.
+
+        The filters are in the SQL for the same reason `search_text` puts them
+        there — a ranked list is CUT at k, so a list drawn from the whole memory
+        and then narrowed to one zone is shorter than one drawn from that zone.
+        The conditions are qualified with `o.` and the vector columns with `e.`,
+        because the two tables are joined here and an unqualified column name in
+        a join is a bug waiting for someone to add a column.
+        """
+        q = ["SELECT e.ref_id AS ref_id, e.vec AS vec "
+             "FROM text_embeddings e "
+             "JOIN observations o ON o.observation_id = e.ref_id "
+             "WHERE e.kind=? AND e.model=?"]
+        args: list = [self.EMBED_OBSERVATION, model]
+        if since is not None:
+            q.append("AND o.timestamp>=?"); args.append(since)
+        if until is not None:
+            q.append("AND o.timestamp<=?"); args.append(until)
+        # Same convention as `_obs_where` and `search_text`: None is no filter,
+        # an empty sequence is a filter nothing satisfies. All three read the
+        # same plan, so all three have to agree on what an empty list means.
+        for col, values in (("location_id", location_ids),
+                            ("camera_id", camera_ids),
+                            ("subject_entity_id", entity_ids)):
+            if values is None:
+                continue
+            if not values:
+                return
+            q.append(f"AND o.{col} IN ({','.join('?' * len(values))})")
+            args.extend(values)
+
+        cur = self.conn.execute(" ".join(q), args)
+        while True:
+            rows = cur.fetchmany(chunk)
+            if not rows:
+                return
+            yield ([r["ref_id"] for r in rows],
+                   np.stack([self._unpack(r["vec"]) for r in rows]))
+
+    def keyframe_backlog(self, model: str, *, limit: int = 256,
+                         offset: int = 0) -> list[sqlite3.Row]:
+        """Observations citing a picture that has no CLIP vector yet.
+
+        `offset` is not a cursor and does not replace the absence test — the
+        backlog is still defined by "no vector for this model", so a completed
+        row never comes back. It exists because retention deletes keyframe FILES
+        while their observation rows live on, and a row whose picture has been
+        pruned can never be embedded. Without a way to step past those, the
+        newest-first walk would hand the same unembeddable batch back forever.
+
+        The store does not stat the filesystem to find them — that is the
+        caller's job, because `retained_keyframe` is where "is this file still
+        here" is already defined and two answers to that would eventually differ.
+        """
+        return self.conn.execute(
+            "SELECT observation_id, source_ref FROM observations o "
+            "WHERE o.source_ref IS NOT NULL AND o.source_ref<>'' AND NOT EXISTS ("
+            "  SELECT 1 FROM text_embeddings e WHERE e.kind=? AND e.model=? "
+            "    AND e.ref_id=o.observation_id) "
+            "ORDER BY o.timestamp DESC LIMIT ? OFFSET ?",
+            (self.EMBED_KEYFRAME, model, limit, offset)).fetchall()
+
+    def keyframe_vectors(self, model: str, observation_ids: Sequence[str]):
+        """`(ids, matrix)` of CLIP vectors for these observations, in one query.
+
+        Re-ranking asks about rows another index already chose, so this takes
+        the ids rather than the filters — there is nothing left to filter by,
+        the hard filters ran upstream to produce the list. Ids with no vector
+        are simply absent from the result, which is what lets a partially-built
+        index re-rank the part it covers instead of refusing to run.
+        """
+        ids = [i for i in (observation_ids or []) if i]
+        if not ids:
+            return [], None
+        out_ids: list[str] = []
+        vecs: list["np.ndarray"] = []
+        # Chunked to stay under SQLite's variable limit, which a broad question
+        # would otherwise reach with a single IN clause.
+        for i in range(0, len(ids), 400):
+            part = ids[i:i + 400]
+            for r in self.conn.execute(
+                    "SELECT ref_id, vec FROM text_embeddings "
+                    f"WHERE kind=? AND model=? AND ref_id IN ({','.join('?' * len(part))})",
+                    [self.EMBED_KEYFRAME, model, *part]):
+                out_ids.append(r["ref_id"])
+                vecs.append(self._unpack(r["vec"]))
+        if not vecs:
+            return [], None
+        return out_ids, np.stack(vecs)
+
+    def drop_embeddings(self, *, kind: Optional[str] = None,
+                        model: Optional[str] = None) -> int:
+        """Forget vectors. The re-index escape hatch, and the only way to retire
+        a model's space once its name has been reused."""
+        conds, args = [], []
+        if kind is not None:
+            conds.append("kind=?"); args.append(kind)
+        if model is not None:
+            conds.append("model=?"); args.append(model)
+        q = "DELETE FROM text_embeddings"
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        with self.tx() as c:
+            return c.execute(q, args).rowcount
 
     # --- alerts (V4-M4) ------------------------------------------------------
     ALERT_STATUSES = ("new", "acknowledged", "resolved")
@@ -545,6 +1011,25 @@ class Store:
             "SELECT * FROM entities WHERE entity_id=?", (entity_id,)
         ).fetchone()
 
+    def get_entities(self, entity_ids: Sequence[str]) -> dict[str, sqlite3.Row]:
+        """The entities behind a set of ids, keyed by id, missing ids absent.
+
+        The point is the N+1 it replaces: aggregating a day of footage used to
+        issue one `get_entity` per observation row, most of them for the same
+        handful of people. Chunked at 900 because the id set here is unbounded —
+        one per row in the worst case — and older SQLite builds cap a statement
+        at 999 bound variables.
+        """
+        ids = list(dict.fromkeys(entity_ids))
+        out: dict[str, sqlite3.Row] = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            for row in self.conn.execute(
+                "SELECT * FROM entities WHERE entity_id IN "
+                f"({','.join('?' * len(chunk))})", chunk):
+                out[row["entity_id"]] = row
+        return out
+
     def list_entities(self, type_: Optional[str] = None, active_only: bool = True
                       ) -> list[sqlite3.Row]:
         q = "SELECT * FROM entities"
@@ -636,6 +1121,18 @@ class Store:
                 (camera_id,)).fetchall()
         return self.conn.execute("SELECT * FROM locations").fetchall()
 
+    def cameras(self) -> list[str]:
+        """Camera names this memory knows about, for the planner's vocabulary.
+
+        Read off `locations`, which is one row per zone and therefore tiny —
+        not `SELECT DISTINCT camera_id FROM observations`, which is the same
+        answer paid for at the size of the whole memory. A camera with no zone
+        drawn on it is invisible here; `ask` unions this with the configured
+        camera names so a freshly added camera is still nameable before anyone
+        has drawn a zone on its frame.
+        """
+        return sorted({r["camera_id"] for r in self.locations() if r["camera_id"]})
+
     # --- observations --------------------------------------------------------
     def add_observation(self, subject_entity_id: str, predicate: str, *,
                         object_entity_id: Optional[str] = None,
@@ -643,27 +1140,71 @@ class Store:
                         confidence: float = 0.5, source_ref: Optional[str] = None,
                         origin: str = "detector", timestamp: Optional[float] = None,
                         camera_id: Optional[str] = None,
-                        user_id: Optional[str] = None
+                        user_id: Optional[str] = None,
+                        description_id: Optional[str] = None,
+                        text: Optional[str] = None
                         ) -> str:
         oid = _uid("obs")
         with self.tx() as c:
             c.execute(
                 "INSERT INTO observations(observation_id,subject_entity_id,predicate,"
-                "object_entity_id,location_id,timestamp,confidence,source_ref,origin,camera_id,user_id,status) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "object_entity_id,location_id,timestamp,confidence,source_ref,origin,camera_id,user_id,status,"
+                "description_id,text) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (oid, subject_entity_id, predicate, object_entity_id, location_id,
                  timestamp or now(), confidence, source_ref, origin, camera_id, user_id,
-                 "new" if origin == "rule" else None),
+                 "new" if origin == "rule" else None, description_id, text),
             )
         return oid
 
-    def observations(self, subject_entity_id: Optional[str] = None,
-                     since: Optional[float] = None,
-                     camera_id: Optional[str] = None,
-                     user_id: Optional[str] = None,
-                     until: Optional[float] = None) -> list[sqlite3.Row]:
-        q = "SELECT * FROM observations"
-        conds, args = [], []
+    # --- observation queries (search plan Phase 3) ---------------------------
+    #
+    # Every filter below composes into one WHERE clause, because the alternative
+    # — the one this replaced — was to load the table into Python and drop rows
+    # in a loop. That is survivable for a week of footage and not for a year.
+    #
+    # Two conventions, stated once here rather than repeated per argument:
+    #
+    #   * `None` means "no filter". An EMPTY sequence means "a filter with no
+    #     permitted values", and matches nothing. They are different questions
+    #     and must not collapse into one: "in any of these zones", asked of an
+    #     empty list of zones, has no answer — it does not mean "anywhere".
+    #     `exclude_predicates` is the one inverted filter, so an empty exclusion
+    #     excludes nothing, which is the same rule read from the other side.
+    #   * Values are always bound. Only the *number* of placeholders is ever
+    #     interpolated into the SQL text — never a value, never a column name.
+    _ORDERS = {"asc": "ASC", "desc": "DESC"}
+
+    @staticmethod
+    def _like_literal(text: str) -> str:
+        """A user's substring as a LIKE pattern matching it literally.
+
+        Without the escaping, a question containing `%` would match every row:
+        the search would silently *widen* at the exact moment it was asked to
+        narrow. Paired with `ESCAPE '\\'` at every use site.
+        """
+        for ch in ("\\", "%", "_"):
+            text = text.replace(ch, "\\" + ch)
+        return f"%{text}%"
+
+    def _obs_where(self, *, subject_entity_id=None, since=None, until=None,
+                   camera_id=None, user_id=None, location_ids=None,
+                   camera_ids=None, entity_ids=None, exclude_entity_ids=None,
+                   observation_ids=None,
+                   predicate_contains=None, predicate_prefixes=None,
+                   exclude_predicates=None, origins=None, min_confidence=None,
+                   match_any: bool = False) -> tuple[str, list]:
+        """The shared WHERE clause. Returns (sql_fragment, bound_args)."""
+        conds: list[str] = []
+        args: list = []
+
+        def any_of(col: str, values) -> str:
+            vals = list(values)
+            if not vals:
+                return "0"                  # no permitted values -> no rows
+            args.extend(vals)
+            return f"{col} IN ({','.join('?' * len(vals))})"
+
         if subject_entity_id:
             conds.append("subject_entity_id=?"); args.append(subject_entity_id)
         if since is not None:
@@ -674,10 +1215,139 @@ class Store:
             conds.append("camera_id=?"); args.append(camera_id)
         if user_id is not None:
             conds.append("user_id=?"); args.append(user_id)
-        if conds:
-            q += " WHERE " + " AND ".join(conds)
-        q += " ORDER BY timestamp"
+        if location_ids is not None:
+            conds.append(any_of("location_id", location_ids))
+        if camera_ids is not None:
+            conds.append(any_of("camera_id", camera_ids))
+        if entity_ids is not None:
+            conds.append(any_of("subject_entity_id", entity_ids))
+        if exclude_entity_ids:
+            # Inverted, so it follows `exclude_predicates`: an empty exclusion
+            # excludes nothing. NULL is not a concern here — every observation
+            # has a subject, which is the one column the write path requires.
+            excl_e = list(exclude_entity_ids)
+            conds.append(
+                f"subject_entity_id NOT IN ({','.join('?' * len(excl_e))})")
+            args.extend(excl_e)
+        if origins is not None:
+            conds.append(any_of("origin", origins))
+        if min_confidence is not None:
+            conds.append("confidence>=?"); args.append(min_confidence)
+        if predicate_prefixes is not None:
+            prefixes = list(predicate_prefixes)
+            if not prefixes:
+                conds.append("0")
+            else:
+                conds.append("(" + " OR ".join(
+                    "predicate LIKE ? ESCAPE '\\'" for _ in prefixes) + ")")
+                # _like_literal wraps both ends; a prefix match wants only the
+                # trailing wildcard, so the leading one is dropped.
+                args.extend(self._like_literal(p)[1:] for p in prefixes)
+        if exclude_predicates:
+            excl = list(exclude_predicates)
+            conds.append(f"predicate NOT IN ({','.join('?' * len(excl))})")
+            args.extend(excl)
+
+        # The two ways a word question reaches rows: the substring the machine
+        # contract is matched on ('rule_fired:' carries no prose), and the ids
+        # the lexical index ranked. `match_any` ORs them — Phase 2's union rule,
+        # now expressed in SQL instead of two passes in Python. Everything above
+        # still ANDs, so widening recall can never cross a hard filter.
+        word: list[str] = []
+        if predicate_contains is not None:
+            word.append("LOWER(predicate) LIKE ? ESCAPE '\\'")
+            args.append(self._like_literal(predicate_contains.lower()))
+        if observation_ids is not None:
+            word.append(any_of("observation_id", observation_ids))
+        if word:
+            conds.append("(" + (" OR " if match_any else " AND ").join(word) + ")")
+
+        return (" WHERE " + " AND ".join(conds)) if conds else "", args
+
+    def observations(self, subject_entity_id: Optional[str] = None,
+                     since: Optional[float] = None,
+                     camera_id: Optional[str] = None,
+                     user_id: Optional[str] = None,
+                     until: Optional[float] = None,
+                     *,
+                     location_ids: Optional[Sequence[str]] = None,
+                     camera_ids: Optional[Sequence[str]] = None,
+                     entity_ids: Optional[Sequence[str]] = None,
+                     exclude_entity_ids: Optional[Sequence[str]] = None,
+                     observation_ids: Optional[Sequence[str]] = None,
+                     predicate_contains: Optional[str] = None,
+                     predicate_prefixes: Optional[Sequence[str]] = None,
+                     exclude_predicates: Optional[Sequence[str]] = None,
+                     origins: Optional[Sequence[str]] = None,
+                     min_confidence: Optional[float] = None,
+                     match_any: bool = False,
+                     order: str = "asc",
+                     limit: Optional[int] = None) -> list[sqlite3.Row]:
+        """Observation rows matching every filter given, in timestamp order.
+
+        `entity_ids` and `observation_ids` are bound one placeholder per id, so
+        they are for sets of tens or hundreds — a ranked shortlist, not a way to
+        pass the whole table back in.
+        """
+        try:
+            direction = self._ORDERS[order]
+        except KeyError:
+            raise ValueError(
+                f"order must be one of {sorted(self._ORDERS)}, not {order!r}") from None
+        where, args = self._obs_where(
+            subject_entity_id=subject_entity_id, since=since, until=until,
+            camera_id=camera_id, user_id=user_id, location_ids=location_ids,
+            camera_ids=camera_ids, entity_ids=entity_ids,
+            exclude_entity_ids=exclude_entity_ids,
+            observation_ids=observation_ids,
+            predicate_contains=predicate_contains,
+            predicate_prefixes=predicate_prefixes,
+            exclude_predicates=exclude_predicates, origins=origins,
+            min_confidence=min_confidence, match_any=match_any)
+        # `rowid` makes the order total. Without it, rows sharing a timestamp —
+        # which every multi-fact VLM report produces, since one frame writes
+        # several rows at one instant — come back in whatever order the chosen
+        # index happened to yield, so adding a filter could silently reshuffle
+        # the states listed under an entity. Ties now break by insertion order:
+        # the order the report was written in, which is the order it was read in.
+        q = (f"SELECT * FROM observations{where} "
+             f"ORDER BY timestamp {direction}, rowid {direction}")
+        if limit is not None:
+            q += " LIMIT ?"; args.append(limit)
         return self.conn.execute(q, args).fetchall()
+
+    def count_observations(self, subject_entity_id: Optional[str] = None,
+                           since: Optional[float] = None,
+                           camera_id: Optional[str] = None,
+                           user_id: Optional[str] = None,
+                           until: Optional[float] = None,
+                           **filters) -> int:
+        """How many rows match — counted by SQLite, not by len() over the rows.
+
+        Same filters as `observations()`. The difference matters: the call sites
+        this replaced built a full list of row objects and then threw all of them
+        away except the length.
+        """
+        where, args = self._obs_where(
+            subject_entity_id=subject_entity_id, since=since, until=until,
+            camera_id=camera_id, user_id=user_id, **filters)
+        return self.conn.execute(
+            f"SELECT COUNT(*) c FROM observations{where}", args).fetchone()["c"]
+
+    def scene_subjects(self) -> list[str]:
+        """Every place-owned subject that actually appears in the memory.
+
+        `scene:<id>` subjects are synthetic — `scene_subject()` builds them from
+        a zone, a camera, or nothing at all, and none of them have an entities
+        row — so the only authority on which exist is the observations. Written
+        as a range rather than `LIKE 'scene:%'` because a range is what SQLite
+        can answer from idx_obs_subj_time without reading the rows.
+        """
+        hi = SCENE_PREFIX[:-1] + chr(ord(SCENE_PREFIX[-1]) + 1)
+        return [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT subject_entity_id FROM observations "
+            "WHERE subject_entity_id >= ? AND subject_entity_id < ?",
+            (SCENE_PREFIX, hi))]
 
     def get_observation(self, observation_id: str) -> Optional[sqlite3.Row]:
         return self.conn.execute(
@@ -691,6 +1361,60 @@ class Store:
             (subject_entity_id, predicate, object_entity_id),
         ).fetchone()
         return row["t"] if row and row["t"] is not None else None
+
+    def newest_observation_at(self) -> Optional[float]:
+        """When memory last recorded anything, or None if it never has.
+
+        Distillation measures its scan window back from here rather than from
+        `now()`, so an outage does not present as a routine ending.
+        `MAX(timestamp)` is answered off the tail of idx_obs_time_loc rather
+        than by scanning.
+        """
+        row = self.conn.execute("SELECT MAX(timestamp) t FROM observations").fetchone()
+        return row["t"] if row and row["t"] is not None else None
+
+    # --- scene descriptions (search plan Phase 1) ----------------------------
+    def add_scene_description(self, *, model: str, raw: dict, text: str,
+                              timestamp: Optional[float] = None,
+                              camera_id: Optional[str] = None,
+                              location_id: Optional[str] = None,
+                              source_ref: Optional[str] = None) -> str:
+        """Store one VLM report whole, before any of it is flattened into rows.
+
+        This is the audit copy. If a later phase changes how reports are
+        flattened, it can be re-run over these rows; if the flattening ever
+        drops something again, `raw` is the evidence that it was there.
+        """
+        did = _uid("desc")
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO scene_descriptions(description_id,camera_id,location_id,"
+                "timestamp,source_ref,model,raw,text) VALUES (?,?,?,?,?,?,?,?)",
+                (did, camera_id, location_id, timestamp or now(), source_ref, model,
+                 json.dumps(raw, sort_keys=True), text),
+            )
+        return did
+
+    def get_scene_description(self, description_id: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM scene_descriptions WHERE description_id=?",
+            (description_id,)).fetchone()
+
+    def scene_descriptions(self, *, since: Optional[float] = None,
+                           until: Optional[float] = None,
+                           camera_id: Optional[str] = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM scene_descriptions"
+        conds, args = [], []
+        if since is not None:
+            conds.append("timestamp>=?"); args.append(since)
+        if until is not None:
+            conds.append("timestamp<=?"); args.append(until)
+        if camera_id is not None:
+            conds.append("camera_id=?"); args.append(camera_id)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        q += " ORDER BY timestamp"
+        return self.conn.execute(q, args).fetchall()
 
     # --- scene snapshots -----------------------------------------------------
     def add_snapshot(self, location_id: str, present_entity_ids: Sequence[str],
@@ -738,12 +1462,21 @@ class Store:
                           location_id: Optional[str] = None,
                           supporting_observation_ids: Sequence[str] = (),
                           obs_confidence: float = 1.0,
+                          times: int = 1,
                           at: Optional[float] = None) -> str:
         """Create-or-strengthen a weighted edge (§7). Bounded additive update
-        scaled by observation confidence; promotes to confirmed past threshold."""
+        scaled by observation confidence; promotes to confirmed past threshold.
+
+        `times` applies the increment n times in one statement, for a caller
+        that has already counted its evidence. It is exactly equivalent to n
+        calls — the update is additive and the cap is a `min`, so
+        `min(cap, w + n*inc)` is where n applications land — and it is the
+        difference between one write and one per observation (search plan
+        Phase 5, G9).
+        """
         cfg = CONFIG.distill
         at = at or now()
-        inc = cfg.weight_increment * max(0.0, min(1.0, obs_confidence))
+        inc = cfg.weight_increment * max(0.0, min(1.0, obs_confidence)) * max(1, int(times))
         existing = self.find_relation(kind, subject_entity_id, predicate,
                                       object_entity_id, location_id)
         with self.tx() as c:
@@ -816,6 +1549,128 @@ class Store:
             q += " AND kind=?"; args.append(kind)
         q += " ORDER BY weight DESC"
         return self.conn.execute(q, args).fetchall()
+
+    # --- distilled knowledge, queried (search plan Phase 5) -------------------
+    #
+    # `relations()` above answers "everything about this one subject", which is
+    # what the graph UI expands. A question arrives with a *set* of subjects and
+    # a window, so it needs the same table asked the other way round. Same
+    # `None` = no filter / `[]` = matches nothing convention as `_obs_where`,
+    # because the same plan feeds both and a zone list that resolved to nothing
+    # must not mean "anywhere" here and "nowhere" there.
+    def relation_edges(self, *, subject_entity_ids: Optional[Sequence[str]] = None,
+                       object_entity_ids: Optional[Sequence[str]] = None,
+                       kinds: Optional[Sequence[str]] = None,
+                       predicate_prefixes: Optional[Sequence[str]] = None,
+                       location_ids: Optional[Sequence[str]] = None,
+                       min_weight: float = 0.0,
+                       status: Optional[Sequence[str]] = None,
+                       include_suppressed: bool = False) -> list[sqlite3.Row]:
+        """Distilled edges matching every filter given, strongest first.
+
+        Suppressed edges are excluded by default and that default is the point:
+        `suppress_relation` is an operator saying a belief is wrong, so it must
+        not come back as an answer to a question phrased differently.
+        """
+        conds = ["weight>=?"]
+        args: list[Any] = [min_weight]
+
+        def any_of(col: str, values) -> str:
+            vals = list(values)
+            if not vals:
+                return "0"                  # no permitted values -> no rows
+            args.extend(vals)
+            return f"{col} IN ({','.join('?' * len(vals))})"
+
+        for col, values in (("subject_entity_id", subject_entity_ids),
+                            ("object_entity_id", object_entity_ids),
+                            ("kind", kinds), ("location_id", location_ids),
+                            ("status", status)):
+            if values is not None:
+                conds.append(any_of(col, values))
+        if predicate_prefixes is not None:
+            prefixes = list(predicate_prefixes)
+            if not prefixes:
+                conds.append("0")
+            else:
+                conds.append("(" + " OR ".join(
+                    "predicate LIKE ? ESCAPE '\\'" for _ in prefixes) + ")")
+                args.extend(self._like_literal(p)[1:] for p in prefixes)
+        if not include_suppressed:
+            conds.append("status<>'suppressed'")
+        return self.conn.execute(
+            "SELECT * FROM relations WHERE " + " AND ".join(conds)
+            + " ORDER BY weight DESC, predicate", args).fetchall()
+
+    def habits(self, *, entity_ids: Optional[Sequence[str]] = None,
+               location_ids: Optional[Sequence[str]] = None,
+               min_weight: float = 0.0,
+               status: Optional[Sequence[str]] = None) -> list[sqlite3.Row]:
+        """Mined temporal patterns — `kind='habit'` — for these subjects.
+
+        Named separately from `relation_edges` because a habit is what "how
+        often" is actually asking about, and a caller should not have to know
+        that habits and 'uses' edges share a table.
+        """
+        return self.relation_edges(subject_entity_ids=entity_ids,
+                                   location_ids=location_ids, kinds=["habit"],
+                                   min_weight=min_weight, status=status)
+
+    def co_presence(self, *, entity_ids: Optional[Sequence[str]] = None,
+                    since: Optional[float] = None, until: Optional[float] = None,
+                    location_ids: Optional[Sequence[str]] = None) -> list[dict]:
+        """Who shared a place and a moment with whom, as one row per pair.
+
+        The evidence is `scene_snapshots` rather than "both were seen in the
+        same zone within N seconds", and the difference matters: a snapshot is
+        one frame's settled inventory, so two entities in it were *actually in
+        the picture together*. Two observations minutes apart in the same zone
+        are two facts about one place, not a fact about two people.
+
+        The place and the window are pushed into SQL; membership is not, because
+        `present_entity_ids` is a JSON list and a `LIKE '%id%'` over it would be
+        a substring test dressed up as a join. The window is the filter that
+        does the work — reading one day's snapshots to pair them up is cheap,
+        and reading every snapshot ever taken to find one pair is not.
+
+        `entity_ids` selects the ANCHORS, not the answer: the pairs returned are
+        (anchor, companion), so a question naming one person gets back the
+        people who were with them, which is what it asked.
+        """
+        conds, args = [], []
+        if since is not None:
+            conds.append("timestamp>=?"); args.append(since)
+        if until is not None:
+            conds.append("timestamp<=?"); args.append(until)
+        if location_ids is not None:
+            locs = list(location_ids)
+            if not locs:
+                return []
+            conds.append(f"location_id IN ({','.join('?' * len(locs))})")
+            args.extend(locs)
+        q = "SELECT * FROM scene_snapshots"
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        anchors = None if entity_ids is None else set(entity_ids)
+
+        pairs: list[dict] = []
+        for snap in self.conn.execute(q + " ORDER BY timestamp", args):
+            present = json.loads(snap["present_entity_ids"])
+            if len(present) < 2:
+                continue          # alone in the frame is not company
+            for a in present:
+                if anchors is not None and a not in anchors:
+                    continue
+                for b in present:
+                    if a == b:
+                        continue
+                    pairs.append({
+                        "entity_id": a, "with_entity_id": b,
+                        "location_id": snap["location_id"],
+                        "timestamp": snap["timestamp"],
+                        "snapshot_id": snap["snapshot_id"],
+                    })
+        return pairs
 
     # --- predicate schema (legal triples, §6) --------------------------------
     def register_predicate(self, predicate: str, subject_type: str = "any",
@@ -893,6 +1748,15 @@ class Store:
         with self.tx() as c:
             counts["signatures"] = c.execute(
                 "DELETE FROM signatures WHERE entity_id=?", (entity_id,)).rowcount
+            # Before the rows themselves, because the vectors are found THROUGH
+            # them. An embedding of "holding the gate open" is derived data about
+            # a person, so a privacy removal that left it behind would leave the
+            # sentence searchable by meaning after deleting it by name (§11).
+            counts["embeddings"] = c.execute(
+                "DELETE FROM text_embeddings WHERE kind=? AND ref_id IN ("
+                "  SELECT observation_id FROM observations "
+                "   WHERE subject_entity_id=? OR object_entity_id=?)",
+                (self.EMBED_OBSERVATION, entity_id, entity_id)).rowcount
             counts["observations"] = c.execute(
                 "DELETE FROM observations WHERE subject_entity_id=? OR object_entity_id=?",
                 (entity_id, entity_id)).rowcount
@@ -957,7 +1821,7 @@ class Store:
                 continue
             # prefer a labeled entity as the survivor, else the most-observed one
             def rank(e):
-                return (keep_labeled and e in labeled, len(self.observations(e)))
+                return (keep_labeled and e in labeled, self.count_observations(e))
             target = max(members, key=rank)
             for m in members:
                 if m != target:

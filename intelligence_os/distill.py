@@ -24,10 +24,55 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
-from .config import CONFIG, FRAMES_DIR
+from .config import CONFIG, FRAMES_DIR, kind_for_class
 from .store import Store
 
 DAY = 86400.0
+
+# --- when a habit happened (search plan Phase 5, gap G8) ---------------------
+#
+# Habits were bucketed in UTC and rendered in local time, which is a bug you
+# cannot see until the two disagree: a warehouse in Delhi mining "present around
+# 09h" from footage everyone there remembers as half past two. The buckets are
+# a claim about the *working day*, and the working day is local.
+#
+# So the deployment's local clock is the one definition, and it lives here
+# because habit mining is what cuts the buckets. `digest.py` compares an
+# observation's hour against those buckets and so must cut them the same way;
+# `ask.py` groups sightings by weekday and must agree with both. One function,
+# three callers — that is the whole point of it being here rather than inlined.
+#
+# `time.localtime` reads TZ, so a deployment states its timezone the same way
+# every other unix service does, and a test pins it the same way too.
+WEEKDAY_ABBR = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def bucket_hour(ts: float) -> int:
+    """Hour-of-day a timestamp falls in, on the deployment's clock."""
+    return time.localtime(ts).tm_hour
+
+
+def bucket_weekday(ts: float) -> str:
+    """Weekday a timestamp falls on, as 'tue'. Local, for the same reason."""
+    return WEEKDAY_ABBR[time.localtime(ts).tm_wday]
+
+
+def bucket_day(ts: float) -> str:
+    """The calendar day, as 'YYYY-MM-DD'.
+
+    A local date string, not `int(ts // 86400)`. The integer version counts UTC
+    days, so an evening sighting in a positive-offset zone lands on tomorrow —
+    which silently splits one habit across two "days" and can push a real
+    pattern under the `min_days` floor.
+    """
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+# What repeated proximity is allowed to become, per kind of thing (§7: the
+# distiller interprets, but only as far as the evidence reaches). Proximity to a
+# laptop is use; proximity to a dog is company, not use. Anything unmapped keeps
+# the original verb, so a new kind cannot silently acquire a claim.
+PROXIMITY_VERB = {"object": "uses", "vehicle": "uses", "animal": "accompanied_by"}
 
 
 def prune_old_keyframes(days: Optional[float] = None) -> int:
@@ -65,6 +110,7 @@ class Distiller:
     def __init__(self, store: Store, reasoner=None):
         self.store = store
         self.reasoner = reasoner  # optional callable(change, context)->dict
+        self._verb_cache: dict[str, str] = {}   # object entity -> proximity verb
 
     # --- 0. normalization ----------------------------------------------------
     def normalize(self) -> None:
@@ -133,43 +179,86 @@ class Distiller:
         return rel_ids
 
     # --- 3. habit mining -----------------------------------------------------
-    def mine_habits(self, min_days: int = 2) -> list[str]:
-        """Recurring temporal patterns: an entity repeatedly present in a location
-        within the same hour-of-day bucket across >= min_days distinct days."""
+    def mine_habits(self, min_days: int = 2, *, since: Optional[float] = None,
+                    until: Optional[float] = None) -> list[str]:
+        """Recurring temporal patterns, at two granularities.
+
+            present_around_14h        this hour, on any day
+            present_tue_around_14h    this hour, on Tuesdays
+
+        Both are mined, and the coarse one is not a summary of the fine ones —
+        it is the answer to a different question. "Does the van come by in the
+        afternoon" is about the hour; "does it come on Tuesdays" is about the
+        week, and a van that visits every weekday at 14:00 has a strong hour
+        habit and no weekday habit at all. Reporting only the fine buckets would
+        make every daily pattern look like five weak weekly ones.
+
+        The weekday predicate is a NEW string, so nothing that reads the old one
+        changes meaning: `digest.py` matches the `present_around_` prefix, which
+        `present_tue_around_14h` does not have, and the weekday habits are simply
+        invisible to it rather than mis-parsed.
+
+        `since`/`until` bound the scan (G9). Without them a nightly pass re-reads
+        all of history to re-derive edges it already has — the cost grows with
+        the age of the deployment, on a job that runs forever.
+        """
         rel_ids = []
-        obs = [o for o in self.store.observations() if o["predicate"] == "present"
-               and o["location_id"]]
-        # (entity, location, hour-bucket) -> set of day indices
+        obs = [o for o in self.store.observations(
+                   since=since, until=until, predicate_prefixes=["present"])
+               if o["predicate"] == "present" and o["location_id"]]
+        # (entity, location, predicate) -> set of local calendar days
         buckets: dict[tuple, set] = defaultdict(set)
         evidence: dict[tuple, list] = defaultdict(list)
         for o in obs:
             t = o["timestamp"]
-            day = int(t // DAY)
-            hour = time.gmtime(t).tm_hour
-            key = (o["subject_entity_id"], o["location_id"], hour)
-            buckets[key].add(day)
-            evidence[key].append(o["observation_id"])
-        for (eid, lid, hour), days in buckets.items():
+            day, hour = bucket_day(t), bucket_hour(t)
+            for predicate in (f"present_around_{hour:02d}h",
+                              f"present_{bucket_weekday(t)}_around_{hour:02d}h"):
+                key = (o["subject_entity_id"], o["location_id"], predicate)
+                buckets[key].add(day)
+                evidence[key].append(o["observation_id"])
+        for key, days in buckets.items():
             if len(days) >= min_days:
+                eid, lid, predicate = key
                 rid = self.store.reinforce_relation(
-                    "habit", eid, f"present_around_{hour:02d}h",
-                    location_id=lid, supporting_observation_ids=evidence[(eid, lid, hour)],
+                    "habit", eid, predicate, location_id=lid,
+                    supporting_observation_ids=evidence[key],
                     obs_confidence=min(1.0, len(days) / 5.0))
                 rel_ids.append(rid)
         return rel_ids
 
+    def _proximity_verb(self, object_entity_id: str) -> str:
+        """Which verb repeated `near` earns, from what the object actually is.
+
+        The detected class is carried as the object entity's label (detect.py mints
+        it that way), so a renamed entity falls back to the generic 'uses' — an
+        under-claim, which is the safe direction.
+        """
+        verb = self._verb_cache.get(object_entity_id)
+        if verb is None:
+            ent = self.store.get_entity(object_entity_id)
+            kind = kind_for_class((ent["label"] or "").lower() if ent else "")
+            verb = self._verb_cache[object_entity_id] = PROXIMITY_VERB.get(kind, "uses")
+        return verb
+
     # --- 4. relation mining --------------------------------------------------
-    def mine_relations(self, min_count: int = 3) -> list[str]:
+    def mine_relations(self, min_count: int = 3, *, since: Optional[float] = None,
+                       until: Optional[float] = None) -> list[str]:
         """Co-occurrence/proximity over time -> relations.
-        'near' (person,object) repeated -> 'uses'; frequent presence in a location
-        -> 'frequents'."""
+        'near' repeated -> 'uses' for a thing, 'accompanied_by' for an animal;
+        frequent presence in a location -> 'frequents'.
+
+        `since`/`until` bound the scan, for the same reason `mine_habits` takes
+        them: a nightly job must not get slower every night forever (G9).
+        """
+        self._verb_cache.clear()   # labels can change between passes
         rel_ids = []
         near_counts: Counter = Counter()
         near_evidence: dict[tuple, list] = defaultdict(list)
         freq_counts: Counter = Counter()
         freq_evidence: dict[tuple, list] = defaultdict(list)
 
-        for o in self.store.observations():
+        for o in self.store.observations(since=since, until=until):
             pred = self._canon(o["predicate"])
             if pred == "near" and o["object_entity_id"]:
                 key = (o["subject_entity_id"], o["object_entity_id"])
@@ -180,30 +269,48 @@ class Distiller:
                 freq_counts[key] += 1
                 freq_evidence[key].append(o["observation_id"])
 
+        # One write per edge, weighted by the evidence count (G9). This used to
+        # be `for _ in range(n)`, which issued n UPDATEs to compute a number the
+        # first one could have written: the increment is bounded-additive and the
+        # cap is a min, so n applications of it are the same arithmetic as one
+        # application scaled by n. Identical edges, identical weights — but an
+        # entity with 100k sightings cost 100k statements, and the pass that was
+        # meant to summarise the log was reading and rewriting it instead.
         for (subj, obj), n in near_counts.items():
             if n < min_count:
                 continue
-            for _ in range(n):  # weight grows with evidence count
-                rid = self.store.reinforce_relation(
-                    "relation", subj, "uses", object_entity_id=obj,
-                    supporting_observation_ids=near_evidence[(subj, obj)],
-                    obs_confidence=0.8)
-            rel_ids.append(rid)
+            rel_ids.append(self.store.reinforce_relation(
+                "relation", subj, self._proximity_verb(obj), object_entity_id=obj,
+                supporting_observation_ids=near_evidence[(subj, obj)],
+                obs_confidence=0.8, times=n))
 
         for (subj, lid), n in freq_counts.items():
             if n < min_count:
                 continue
-            for _ in range(n):
-                rid = self.store.reinforce_relation(
-                    "relation", subj, "frequents", location_id=lid,
-                    supporting_observation_ids=freq_evidence[(subj, lid)],
-                    obs_confidence=0.7)
-            rel_ids.append(rid)
+            rel_ids.append(self.store.reinforce_relation(
+                "relation", subj, "frequents", location_id=lid,
+                supporting_observation_ids=freq_evidence[(subj, lid)],
+                obs_confidence=0.7, times=n))
         return rel_ids
 
     # --- orchestration -------------------------------------------------------
+    def mine_window(self) -> Optional[float]:
+        """The `since` a mining pass reads from, or None for all of history.
+
+        Anchored to the newest observation, not to `now()`. A camera that was
+        offline for a fortnight would otherwise come back to a window containing
+        nothing, and the pass would quietly un-reinforce every habit it has —
+        turning an outage into a claim that the routine stopped.
+        """
+        days = CONFIG.distill.mine_window_days
+        if not days:
+            return None
+        newest = self.store.newest_observation_at()
+        return None if newest is None else newest - days * DAY
+
     def run(self) -> dict:
         self.store.register_predicate("uses", "person", "object")
+        self.store.register_predicate("accompanied_by", "person", "object")
         self.store.register_predicate("frequents", "person", "any")
         self.store.register_predicate("acquired", "object", "any")
         self.store.register_predicate("removed", "object", "any")
@@ -211,16 +318,68 @@ class Distiller:
         self.store.decay_relations()          # age existing edges first (§7)
         changes = self.change_detection()
         events = self.reason_events(changes)
-        habits = self.mine_habits()
-        relations = self.mine_relations()
+        since = self.mine_window()
+        habits = self.mine_habits(since=since)
+        relations = self.mine_relations(since=since)
+        embedded = self.embed_new_text()
+        # Before the prune, not after, and that is load-bearing: retention
+        # deletes the picture but keeps the row, so a frame not embedded by now
+        # can never be embedded at all. The vector outliving its JPEG is fine —
+        # it describes an observation that is still in memory — but the reverse
+        # is a permanent hole.
+        reranked = self.embed_new_frames()
         pruned = prune_old_keyframes()
         return {
             "changes": len(changes),
             "events": len(events),
             "habits": len(habits),
             "relations": len(relations),
+            "embedded": embedded,
+            "frames_embedded": reranked,
             "keyframes_pruned": pruned,
         }
+
+    def embed_new_text(self) -> int:
+        """Index prose written since the last pass (search plan Phase 6).
+
+        Here rather than in `store.add_observation` on purpose. An embedding is
+        milliseconds of matrix multiply and the observation write path runs per
+        frame, per camera, all day — the one place in this system where that is
+        not free. Batching it into the pass that already exists costs a row
+        being semantically searchable one tick late (60s live, a night in the
+        scheduled configuration) and buys a write path that cannot be slowed
+        down, or taken down, by a model.
+
+        Failure is not an error. No encoder installed means zero rows embedded
+        and a search that answers lexically, which is Phase 2's behaviour and
+        was never wrong — only narrower.
+        """
+        from .semantic import backfill      # deferred: optional dep behind it
+        try:
+            return backfill(self.store)
+        except Exception:
+            return 0
+
+    def embed_new_frames(self) -> int:
+        """Index keyframes written since the last pass (search plan Phase 8).
+
+        Off unless a deployment asked for it, and a no-op costing one config
+        read when it did not. The same batching argument as `embed_new_text`
+        applies with more force: a CLIP forward pass over a JPEG is tens of
+        milliseconds, and the write path this would otherwise sit on runs per
+        frame, per camera, all day.
+
+        These vectors only ever change the ORDER of an answer, so a pass that
+        fails or never runs costs nothing but ranking — never reach, and never
+        correctness.
+        """
+        if not CONFIG.visual.enabled:
+            return 0
+        from .visual import backfill        # deferred: optional dep behind it
+        try:
+            return backfill(self.store)
+        except Exception:
+            return 0
 
 
 def main(argv=None) -> int:

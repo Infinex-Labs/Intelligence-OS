@@ -22,6 +22,13 @@ detail.
   project), VLM trigger sensitivity, and habit decay.
 - **[The AI Assistant](assistant.md)** — how a question becomes a grounded
   answer, and why the LLM never sees the memory graph directly.
+- **[Search architecture plan](search-architecture-plan.md)** — *in progress.* An
+  audit of why search misses questions it should answer, and the staged plan to
+  fix it: keep what the vision model saw, index it properly, and reach the habit
+  and co-presence memory that search cannot currently touch.
+- **[Search baseline scorecard](search-baseline.md)** — what search can and
+  cannot answer today, measured. One row per phase of the plan above; CI asserts
+  the numbers still match, in both directions.
 
 ## Building on it
 

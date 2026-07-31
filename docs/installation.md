@@ -30,6 +30,7 @@ First visit prompts you to create a login. There is no default password.
 | `pip install -r requirements.txt` | The full pipeline: motion, detection, tracking, zones, observations, rules, distillation, dashboard. | Pulls torch — several hundred MB |
 | `+ pip install -e ".[identity]"` | Stage C: face re-identification across days and cameras. | +InsightFace, +onnxruntime |
 | `+ pip install -e ".[vlm]"` | Stage F: natural-language scene descriptions, the AI Assistant, rule compilation. | +anthropic, and an API key |
+| `+ pip install -e ".[semantic]"` | Search by meaning: "loitering" finds a recorded "standing around, waiting". | +sentence-transformers, ~120 MB of weights |
 
 The design point is that **the middle row is fully useful on its own**: no cloud
 key, no biometrics, no account anywhere. The optional extras upgrade it; they
@@ -57,6 +58,42 @@ On the first run the pipeline fetches:
 
 There is no progress bar on some of this. It is downloading, not hung. Give it a
 few minutes on a first run and it will never happen again.
+
+The semantic search model (`all-MiniLM-L12-v2`, ~120 MB) downloads the first
+time anything asks for a vector — normally the first distillation pass after you
+install it. It runs entirely on your machine afterwards, with no network and no
+key. To fetch it and index existing memory up front:
+
+```bash
+python -m intelligence_os.semantic          # build the index
+python -m intelligence_os.semantic --query "someone loitering"
+```
+
+If it is missing, search falls back to term matching and says so in the trace.
+Nothing waits on it and nothing fails.
+
+## Visual re-ranking (off, and needs no extra install)
+
+Optional and **off by default**. It reuses the `[semantic]` extra — the same
+`sentence-transformers` package carries CLIP — so there is no third dependency,
+only ~350 MB more weights fetched on first use.
+
+```bash
+export INTELLIGENCE_OS_VISUAL=1              # or visual_reranking: true in config.yaml
+python -m intelligence_os.visual             # index retained keyframes
+python -m intelligence_os.visual --rank "a dog"
+```
+
+Read what it does narrowly, because the obvious reading is wrong. It **orders**
+results the word and meaning indexes already found, putting the one whose
+picture best fits your words first. It cannot find a result those indexes
+missed, and asking for something never recorded still returns nothing.
+
+`--rank` is spelled that way rather than `--search` for the same reason: it
+prints the closest frames to a phrase and explicitly does not claim any of them
+contains it. An image model always has a closest frame. See *What Phase 8 moved,
+and what it refused to* in [search-baseline.md](search-baseline.md) for the
+measurement, which is the whole argument for why this is a re-ranker.
 
 ## Pins you should not casually change
 
