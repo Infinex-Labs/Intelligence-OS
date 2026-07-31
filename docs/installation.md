@@ -72,6 +72,29 @@ python -m intelligence_os.semantic --query "someone loitering"
 If it is missing, search falls back to term matching and says so in the trace.
 Nothing waits on it and nothing fails.
 
+## Visual re-ranking (off, and needs no extra install)
+
+Optional and **off by default**. It reuses the `[semantic]` extra — the same
+`sentence-transformers` package carries CLIP — so there is no third dependency,
+only ~350 MB more weights fetched on first use.
+
+```bash
+export INTELLIGENCE_OS_VISUAL=1              # or visual_reranking: true in config.yaml
+python -m intelligence_os.visual             # index retained keyframes
+python -m intelligence_os.visual --rank "a dog"
+```
+
+Read what it does narrowly, because the obvious reading is wrong. It **orders**
+results the word and meaning indexes already found, putting the one whose
+picture best fits your words first. It cannot find a result those indexes
+missed, and asking for something never recorded still returns nothing.
+
+`--rank` is spelled that way rather than `--search` for the same reason: it
+prints the closest frames to a phrase and explicitly does not claim any of them
+contains it. An image model always has a closest frame. See *What Phase 8 moved,
+and what it refused to* in [search-baseline.md](search-baseline.md) for the
+measurement, which is the whole argument for why this is a re-ranker.
+
 ## Pins you should not casually change
 
 Both are in `requirements.txt` with the same reasoning:

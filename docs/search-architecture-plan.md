@@ -1,7 +1,9 @@
 # Search & Retrieval Architecture Plan
 
-**Status:** Phases 0–7 landed; 8 still proposal (and recommended deferred). See
-[`search-baseline.md`](search-baseline.md) for the scored trajectory.
+**Status:** Phases 0–8 landed. Phase 8 shipped as **half** of what it proposed —
+visual re-ranking, off by default; the visual *recall* index was measured and
+refused. See [`search-baseline.md`](search-baseline.md) for the scored
+trajectory and the measurement.
 **Scope:** the query/retrieval layers of Intelligence OS — `ask.py`, the search
 surface of `store.py`, the memory-write path in `run.py`/`vlm.py`, and the
 recurrence tables in `distill.py`.
@@ -107,6 +109,7 @@ the answer.
 | Retrieval (coarse) | absent | **Phase 2 + 6** — lexical + semantic recall |
 | Selection (fine) | absent | **Phase 6** — fusion, rerank, dedup, diverse keyframes |
 | Reflection | absent | **Phase 7** ✅ — deterministic relaxation ladder |
+| Visual recall | absent | **Phase 8** ✅ — re-rank only; the recall half refused on measurement |
 | Reconstruction | ✅ present, and stronger than theirs | keep unchanged |
 
 ### 2.1 Explicitly NOT borrowed
@@ -982,7 +985,7 @@ wanted, and this responds only to the unambiguous case.
 
 ---
 
-### Phase 8 — Visual search (optional, gated, later)
+### Phase 8 — Visual search (optional, gated, later) ✅ DONE, in half
 
 **Why.** Some questions describe appearance nobody ever wrote down: *"the red
 van"*, *"the yellow hard hat"*. No text index can find what no text describes.
@@ -994,6 +997,67 @@ table (`kind='keyframe'`, shared joint space), added as a third RRF input.
 
 **Recommendation.** Defer. Ship 0–7, read the eval, and only build this if the
 scorecard shows a real appearance-query gap. **Off by default** if built.
+
+---
+
+**Result.** Built, off by default — and **not as a third RRF input**, because
+that part does not survive measurement.
+
+1. **The recall index was refused, on evidence.** A recall index must be able to
+   say NO; every other index here can. Measured on this system's own 84 retained
+   frames, CLIP cannot, under any of three calibrations (raw cosine,
+   margin-over-median, zero-shot against a prompt bank) or either standard
+   prompt template. `a hospital bed` scores **0.953** on a dim room containing a
+   dog and a sofa — above nine of the twelve things genuinely in shot. Sweeping
+   the threshold does not fix it: at 0.90, recall is already down to a third and
+   false positives remain. The distributions interleave rather than overlap,
+   because a CLIP score says which of a fixed vocabulary is closest, never
+   whether the memory contains it. Full tables in the baseline.
+
+2. **So the shipped rule is one line:** *visual may reorder candidates another
+   index retrieved; it may never introduce one.* This narrows Phase 6's rule
+   rather than excepting it — fusion only ever adds, this only ever reorders —
+   and it is asserted as a set equality, not described.
+
+3. **Which is also what keeps Phase 7 intact.** The ladder makes a dead end
+   legible and can only report a dead end that is allowed to exist. A third
+   recall index returning its nearest frame would make every question non-empty
+   and put *"I could not find it"* back to being indistinguishable from *"it did
+   not happen"*. There is a test named for this.
+
+4. **The re-rank happens after `_fuse`, not inside it.** `_fuse` unions ranked
+   lists, so anything passed to it can introduce rows. Re-ranking a finished
+   list can only permute. That placement is the mechanism, not a tidiness
+   preference.
+
+5. **Boost is RRF-shaped and deliberately weak** — `weight / (rrf_k + rank)`
+   with `weight` 0.5, so a picture can break a tie but cannot overturn two
+   indexes that agree with each other. The component least able to know when it
+   is wrong does not get the deciding vote.
+
+6. **The shared table does not mean a shared space.** CLIP keyframe vectors and
+   MiniLM prose vectors live in one table under different `kind`s *and*
+   different model names, and the query path encodes with the matching tower. A
+   dimension mismatch is refused rather than scored, because the failure mode
+   otherwise is a confident ordering with nothing to reveal it was meaningless.
+
+7. **No new dependency.** `sentence-transformers` was already Phase 6's optional
+   dep and carries the CLIP towers, so the cost is 350MB of weights and not a
+   third package. Indexing the live memory took 6.1s for 475 rows over 84
+   distinct frames; re-running writes nothing.
+
+**Off by default, and not merely out of caution.** What it buys is real but
+narrow — a better picture leads the answer — and it has a cost pointing the
+other way: entity ordering is downstream of observation ordering, so a re-rank
+that promotes the clearest photograph can demote the entity actually *labelled*
+for the query. That is a trade, and the scorecard cannot adjudicate it, because
+the eval corpus is prose with no pictures behind it.
+
+**Not done here.** Keyframe *selection* still picks for time coverage
+(`_diverse_keyframes`) — letting CLIP choose the strip would trade a documented
+guarantee for an unmeasured one. There is no visual filter and no appearance
+plan field: a filter implies the power to exclude, and excluding on a CLIP score
+is the same unshippable claim as including on one.
 
 ---
 
@@ -1009,7 +1073,7 @@ scorecard shows a real appearance-query gap. **Off by default** if built.
 | 5 · Habits + who-with | none | medium | yes (additive) | **2 README questions** |
 | 6 · Semantic + fusion | **~120MB** | med-high | yes (flag) | paraphrase |
 | 7 · Reflection | none | low-med | yes (flag) | no silent failures |
-| 8 · Visual | ~350MB | high | yes (flag) | appearance queries |
+| 8 · Visual | ~350MB, no new package | high | yes (flag) | result *order*, not appearance queries |
 
 **Phases 0–5 need no new dependencies** and fix the data loss, the unreachable
 habits, the latency ceiling, and most guesswork. Phase 6 is the only one gated on
@@ -1019,8 +1083,11 @@ easy to take.
 
 Recommended: **0 → 1 → 2 → 3** as foundations (measurable, no deps, no behaviour
 change you rely on), then **4 → 5** for the largest visible win, then **6 → 7**.
-**0–7 are done.** Phase 7 needed nothing installed, as costed. Only Phase 8
-remains, and the recommendation on it is still to defer.
+**0–8 are done.** Phase 7 needed nothing installed, as costed. Phase 8 needed no
+new package either — `sentence-transformers` already carries the CLIP towers —
+but it is the one phase whose *risk* estimate was right for the wrong reason:
+"high" turned out to be about what CLIP claims rather than about keeping a third
+index in sync, and the answer was to ship the half that makes no claims.
 
 ---
 
@@ -1083,6 +1150,13 @@ now. Tracked in `docs/search-baseline.md`, one row per phase:
   a question whose answer is genuinely "that never happened".
 - **Semantic search can surface plausible-but-wrong rows.** Bounded by hard
   filters, a similarity floor, and visible `match_reason` — not eliminated.
+- **Appearance nobody described is still unfindable, and this is now measured
+  rather than assumed.** Phase 8 established that CLIP cannot distinguish "this
+  frame shows a red van" from "this is the closest frame I have to the words red
+  van" — on this system's own footage, `a hospital bed` scores 0.953 in a room
+  containing neither. So *"the red van"* reaches only what somebody wrote down,
+  and the honest fix is a describer that records appearance, not a retrieval
+  layer that guesses at it. Phase 8 buys result *order*, not reach.
 
 ---
 
@@ -1100,7 +1174,13 @@ now. Tracked in `docs/search-baseline.md`, one row per phase:
    `TZ`. One definition in `distill.py`; `digest.py` and `ask.py` call it.
 3. **Row-volume ceiling** — cap observations emitted per VLM description? Suggest
    a configurable cap, default generous. *Phase 1 tuning, not a blocker.*
-4. **Phase 8** — defer pending the scorecard. Recommend yes, defer. Nothing in
-   the Phase 7 results changes this: no case in the suite fails for want of an
-   appearance query, and the ladder's reported empties are where such a gap
-   would show up first if one existed.
+4. ~~**Phase 8**~~ — **answered: build the ranker, refuse the recall index.**
+   Taken in Phase 8 on measurement rather than on the recommendation, which had
+   been to defer. CLIP cannot say NO on this system's own frames (`a hospital
+   bed` at 0.953 in a room containing neither), and a recall index that cannot
+   detect absence would invent evidence *with a photograph attached* and would
+   quietly repeal Phase 7 by making every question non-empty. Re-ranking needs
+   no such power and keeps its usefulness, so that is what shipped — off by
+   default, behind `INTELLIGENCE_OS_VISUAL`. The original instinct that no case
+   in the suite fails for want of an appearance query still holds, and is now
+   also why the phase is unscoreable by this corpus.

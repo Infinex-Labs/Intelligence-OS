@@ -579,6 +579,16 @@ class Store:
     # habits already have, and it is stated in the docs rather than hidden.
 
     EMBED_OBSERVATION = "observation"
+    # Search plan Phase 8. A CLIP vector for the picture an observation cited,
+    # stored under the OBSERVATION's id rather than the file's, so re-ranking is
+    # a lookup on the ids already in hand instead of a second join back through
+    # `source_ref`. One image cited by six rows is encoded once and written six
+    # times: ~2KB apiece against a forward pass apiece, which is the cheap side
+    # of that trade by three orders of magnitude.
+    #
+    # These vectors share a table with the semantic ones and NOT a space. The
+    # `model` column is what keeps them apart, and every read here filters on it.
+    EMBED_KEYFRAME = "keyframe"
 
     def add_embeddings(self, kind: str, model: str,
                        rows: Sequence[tuple[str, "np.ndarray"]]) -> int:
@@ -680,6 +690,57 @@ class Store:
                 return
             yield ([r["ref_id"] for r in rows],
                    np.stack([self._unpack(r["vec"]) for r in rows]))
+
+    def keyframe_backlog(self, model: str, *, limit: int = 256,
+                         offset: int = 0) -> list[sqlite3.Row]:
+        """Observations citing a picture that has no CLIP vector yet.
+
+        `offset` is not a cursor and does not replace the absence test — the
+        backlog is still defined by "no vector for this model", so a completed
+        row never comes back. It exists because retention deletes keyframe FILES
+        while their observation rows live on, and a row whose picture has been
+        pruned can never be embedded. Without a way to step past those, the
+        newest-first walk would hand the same unembeddable batch back forever.
+
+        The store does not stat the filesystem to find them — that is the
+        caller's job, because `retained_keyframe` is where "is this file still
+        here" is already defined and two answers to that would eventually differ.
+        """
+        return self.conn.execute(
+            "SELECT observation_id, source_ref FROM observations o "
+            "WHERE o.source_ref IS NOT NULL AND o.source_ref<>'' AND NOT EXISTS ("
+            "  SELECT 1 FROM text_embeddings e WHERE e.kind=? AND e.model=? "
+            "    AND e.ref_id=o.observation_id) "
+            "ORDER BY o.timestamp DESC LIMIT ? OFFSET ?",
+            (self.EMBED_KEYFRAME, model, limit, offset)).fetchall()
+
+    def keyframe_vectors(self, model: str, observation_ids: Sequence[str]):
+        """`(ids, matrix)` of CLIP vectors for these observations, in one query.
+
+        Re-ranking asks about rows another index already chose, so this takes
+        the ids rather than the filters — there is nothing left to filter by,
+        the hard filters ran upstream to produce the list. Ids with no vector
+        are simply absent from the result, which is what lets a partially-built
+        index re-rank the part it covers instead of refusing to run.
+        """
+        ids = [i for i in (observation_ids or []) if i]
+        if not ids:
+            return [], None
+        out_ids: list[str] = []
+        vecs: list["np.ndarray"] = []
+        # Chunked to stay under SQLite's variable limit, which a broad question
+        # would otherwise reach with a single IN clause.
+        for i in range(0, len(ids), 400):
+            part = ids[i:i + 400]
+            for r in self.conn.execute(
+                    "SELECT ref_id, vec FROM text_embeddings "
+                    f"WHERE kind=? AND model=? AND ref_id IN ({','.join('?' * len(part))})",
+                    [self.EMBED_KEYFRAME, model, *part]):
+                out_ids.append(r["ref_id"])
+                vecs.append(self._unpack(r["vec"]))
+        if not vecs:
+            return [], None
+        return out_ids, np.stack(vecs)
 
     def drop_embeddings(self, *, kind: Optional[str] = None,
                         model: Optional[str] = None) -> int:

@@ -318,6 +318,81 @@ class ReflectionConfig:
 
 
 @dataclass
+class VisualConfig:
+    """Visual re-ranking over stored keyframes (search plan Phase 8).
+
+    The phase was specified as a third recall index: CLIP vectors over
+    keyframes, fused alongside the lexical and semantic lists, so that "the red
+    van" could be found in a memory where nobody wrote the words down. It is
+    NOT built that way, and the reason is a measurement rather than a
+    preference.
+
+    A recall index must be able to say NO. Every other index here can. bm25
+    returns nothing when no term matches; the semantic layer has `min_similarity`
+    under it, chosen in Phase 6 precisely so a question with no answer gets one.
+    CLIP, measured on this system's own 84 retained frames — a dim indoor room
+    with a dog on a sofa, a laptop on a table, people in white — cannot:
+
+        query                        best frame scores        actually there?
+        white wireless earbuds                   0.929                    yes
+        a laptop computer                        0.803                    yes
+        a dog                                    0.433                    yes
+        a dark wooden panel                      0.110                    yes
+        a hospital bed                           0.953                     NO
+        a suitcase                               0.842                     NO
+        a cardboard box                          0.729                     NO
+        snow on the ground                       0.399                     NO
+
+    (Zero-shot probability against a 20-prompt bank, which is the calibration
+    that separates BEST. Raw cosine and margin-over-median are both worse; "a
+    photo of {}" and "a security camera photo of {}" templating changes nothing.
+    12 present probes against 61 absent ones.)
+
+    There is no threshold in that. "A hospital bed" outscores nine of the twelve
+    things genuinely in frame. At 0.90, where recall has already fallen to a
+    third, false positives remain. The distributions do not overlap slightly at
+    the edges — they interleave across the whole range, because a CLIP score is
+    a statement about the closest thing in a fixed vocabulary, not about whether
+    the memory contains it.
+
+    An ungated recall index would therefore answer "was there a red van?" with a
+    photograph of somebody in a white shirt — evidence, complete with a picture,
+    for a thing that never happened. It would also make every empty result
+    non-empty, which quietly repeals Phase 7: the ladder can only report a dead
+    end that is allowed to exist.
+
+    So what is built is the half the measurement supports. CLIP RANKS well here
+    (`a laptop computer` -> rank 1 of 84, `white wireless earbuds` -> 1 of 84,
+    `a dog` -> 2 of 84), and ranking is safe when something else has already
+    vouched for the row. Visual may reorder candidates the lexical or semantic
+    index retrieved; it may never introduce one. That is a narrowing of Phase
+    6's rule, not an exception to it: fusion only ever adds, and this only ever
+    reorders.
+    """
+    # OFF by default, as the plan required of this phase if it was built at all
+    # — and one variable rather than two, so its absence IS the off position and
+    # there is no state where the switch and the config disagree.
+    enabled: bool = bool(os.environ.get("INTELLIGENCE_OS_VISUAL"))
+    # CLIP's joint image/text space. Stored in the `model` column beside every
+    # vector like the semantic index's is, and the reason matters more here:
+    # these vectors are NOT comparable with the semantic ones. A CLIP keyframe
+    # vector may only ever be dotted with a CLIP TEXT vector, so the query
+    # encoder is this model's text tower and not MiniLM.
+    model: str = "clip-ViT-B-32"
+    # What agreeing with the ranked list is worth. Expressed in RRF's own terms:
+    # a visual agreement contributes `weight / (rrf_k + visual_rank)`, the same
+    # shape as a list contributes, so a re-rank cannot outvote the two indexes
+    # that actually found the row unless they disagree with each other.
+    weight: float = 0.5
+    # How many of the already-retrieved candidates get re-ranked. Re-ranking is
+    # a forward pass per DISTINCT keyframe, so this bounds the cost of a broad
+    # question in images decoded rather than in rows scanned.
+    top_k: int = 50
+    batch_size: int = 32
+    scan_chunk: int = 4096
+
+
+@dataclass
 class VLMConfig:
     # Anthropic model used for BOTH the describer [F] and reasoner [H] roles.
     model: str = "claude-opus-4-8"
@@ -335,6 +410,7 @@ class Config:
     distill: DistillConfig = field(default_factory=DistillConfig)
     semantic: SemanticConfig = field(default_factory=SemanticConfig)
     reflect: ReflectionConfig = field(default_factory=ReflectionConfig)
+    visual: VisualConfig = field(default_factory=VisualConfig)
     vlm: VLMConfig = field(default_factory=VLMConfig)
     # Retention: drop raw frames/crops older than this many days (§11).
     raw_retention_days: int = 7
@@ -386,6 +462,12 @@ def apply_app_config(cfg: dict | None = None) -> None:
         # correct answer to a question nobody asked, and disclosure is only
         # worth something if somebody reads it.
         CONFIG.reflect.enabled = bool(cfg["widen_empty_searches"])
+    if "visual_reranking" in cfg:
+        # Opt-in, and it buys ORDER rather than reach: the same rows come back,
+        # with the ones whose picture matches the words first. It cannot widen
+        # an answer, so switching it on cannot make a question find something
+        # new — see `VisualConfig` for the measurement that settled that.
+        CONFIG.visual.enabled = bool(cfg["visual_reranking"])
     if "object_classes" in cfg:
         # An empty/absent list means "keep the defaults"; an explicit list wins.
         # `person` is always detected and is not part of this list (detect.py adds

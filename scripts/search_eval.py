@@ -103,6 +103,19 @@ def render(report: dict) -> str:
         w("  RELAXATION LADDER      off — an empty result is final "
           "(unset INTELLIGENCE_OS_NO_RELAX)")
 
+    # Phase 8, and the wording is chosen to keep it out of the scores above.
+    # Visual re-ranking cannot change WHICH rows an answer contains, only their
+    # order, so it cannot move `passing`, `silent failures` or recall@k — the
+    # right row is either retrieved or it is not, and that was settled before
+    # this ran. A scorecard line that implied otherwise would be inviting
+    # someone to read a latency wobble as a quality change.
+    if report.get("visual"):
+        w(f"  VISUAL RE-RANK         ON — {report['visual']} keyframe vector(s); "
+          f"orders results, never widens them")
+    else:
+        w("  VISUAL RE-RANK         off — result ORDER is the other two indexes' "
+          "(set INTELLIGENCE_OS_VISUAL=1)")
+
     # --- what is blocking what ---------------------------------------------
     by_phase: dict[int, list[str]] = {}
     for r in report["cases"]:

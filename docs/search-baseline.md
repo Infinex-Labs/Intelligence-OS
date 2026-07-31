@@ -14,6 +14,20 @@ never overwrite, so the trajectory stays in version control.
 | **5 — habits and co-presence** | **28/32** | **4/32** | **76.7%** | **85.0%** | **0.850** | 100.0% | 0.77 | 78.49 |
 | **6 — semantic retrieval + fusion** | **32/32** | **0/32** | **91.7%** | **100.0%** | **1.000** | 100.0% | 70.66 | 328.13 |
 | **7 — relaxation ladder** | **37/37** | **0/37** | 88.9% | **100.0%** | 0.979 | 100.0% | 67.76 | 296.00 |
+| **8 — visual re-rank** | 37/37 | 0/37 | 88.9% | 100.0% | 0.979 | 100.0% | 69.47 | 283.36 |
+
+**The Phase 8 row is deliberately identical, and an identical row is the
+correct result.** Visual re-ranking cannot change *which* rows an answer
+contains — only their order — so it cannot move cases passing, silent failures
+or recall@k in either direction. It is recorded here because a trajectory with a
+gap in it invites the question of whether the phase was measured at all. It was:
+the numbers above are a paired run with `INTELLIGENCE_OS_VISUAL=1`, and the
+latency difference against Phase 7 is noise rather than cost, because with no
+keyframe vectors present the re-rank returns at its second gate. **This corpus
+cannot score the phase** — it is synthetic prose with no pictures behind it, so
+the visual index is empty on every machine and the scorecard says `off` even
+with the switch on. What Phase 8 *is* measured against is this system's own 84
+retained frames, below.
 
 **Read the Phase 7 row against a longer case list, not the row above it.** Phase
 7 added five cases — four questions that return nothing as asked and one that
@@ -607,6 +621,143 @@ near-miss.
 possible two is an answer, not a dead end. Deciding a result is *insufficient* is
 a judgement about what the asker wanted, and this ladder only ever responds to
 the unambiguous case: nothing at all.
+
+## What Phase 8 moved, and what it refused to
+
+Phase 8 was specified as a third *recall* index: CLIP vectors over keyframes,
+fused beside the lexical and semantic lists, so *"the red van"* could be found in
+a memory where nobody wrote the words down. **That half was measured and
+refused.** What shipped is re-ranking, off by default.
+
+### The measurement that decided it
+
+A recall index must be able to say NO. Every other index here can. bm25 returns
+nothing when no term matches; the semantic layer has `min_similarity` under it,
+set in Phase 6 for exactly this reason. So before building anything, CLIP was
+asked the same question Phase 6 asked MiniLM — measured not on a benchmark but
+on **this system's own 84 retained frames**, a dim indoor room with a dog on a
+sofa, a laptop and an earbud case on a table, and people in white.
+
+Three calibrations were tried. Best-scoring frame per query:
+
+| calibration | worst thing that IS there | best thing that is NOT | separation |
+|---|---|---|---|
+| raw cosine | 0.240 `a dark wooden panel` | 0.266 `snow on the ground` | **−0.026** |
+| margin over the query's own median | 0.022 | 0.070 | **−0.048** |
+| zero-shot vs a 20-prompt bank | 0.110 | 0.399 | **−0.289** |
+
+Prompt templating changes nothing: `a photo of {}` moves the raw-cosine gap from
+−0.014 to −0.009, `a security camera photo of {}` to −0.010. Both still negative.
+
+The zero-shot competition is the best of the three and looked survivable against
+ten absent probes — every one of them returned zero frames at a 0.5 threshold.
+Against **61** absent probes it collapses:
+
+| probe | score | actually in frame? |
+|---|---|---|
+| `a hospital bed` | **0.953** | no |
+| `white wireless earbuds` | 0.929 | yes |
+| `a suitcase` | **0.842** | no |
+| `a laptop computer` | 0.803 | yes |
+| `a cardboard box` | **0.729** | no |
+| `a dog` | 0.433 | yes |
+| `snow on the ground` | **0.399** | no |
+| `a dark wooden panel` | 0.110 | yes |
+
+"A hospital bed" outscores nine of the twelve things genuinely in shot. Sweeping
+the threshold does not rescue it — at 0.90, where recall has already fallen to a
+third, false positives remain:
+
+| threshold | recall | absent probes still returning frames |
+|---|---|---|
+| 0.50 | 58.3% | 9 of 61 |
+| 0.70 | 50.0% | 3 of 61 |
+| 0.90 | 33.3% | 1 of 61 |
+
+These are not distributions that overlap at the edges. They interleave across
+the whole range, because a CLIP score says which of a fixed vocabulary is
+closest — never whether the memory contains it.
+
+### Why that forbids recall rather than merely complicating it
+
+An ungated recall index would answer *"was there a red van?"* with a photograph
+of somebody in a white shirt. Not a weak answer: **evidence, with a picture**,
+for a thing that never happened. The keyframe makes it worse than the text-only
+version of the same failure, because a picture reads as proof.
+
+It would also repeal Phase 7. The ladder makes a dead end legible, and it can
+only report a dead end that is allowed to exist. An index that always returns its
+nearest frame makes every question non-empty, and *"I could not find it"* goes
+back to being indistinguishable from *"it did not happen"* — the failure the
+previous phase was entirely about.
+
+### What shipped instead
+
+CLIP cannot detect absence. It is nonetheless a **good ranker** on these frames:
+
+| query | rank of the correct frame |
+|---|---|
+| `a laptop computer` | 1 of 84 |
+| `white wireless earbuds` | 1 of 84 |
+| `a dog` | 2 of 84 |
+
+Ranking is safe exactly where absence-detection is not needed — when another
+index has already established the row is a match. So the rule is one line:
+
+> **Visual may reorder candidates another index retrieved. It may never
+> introduce one.**
+
+That is a narrowing of Phase 6's rule, not an exception to it. Fusion only ever
+adds; this only ever reorders. It is asserted directly (`set(out) == set(in)`),
+and verified end-to-end against the real index: six questions, visual off then
+on, the id set identical every time.
+
+### It is off by default, and the honest reason is not caution
+
+It is off because **what it buys is real but narrow, and it has a cost that runs
+the other way.** On the live memory, *"dog"* retrieves 25 rows, all of them
+genuinely about the dog. Re-ranking changes which picture of the dog leads —
+promoting the frames where the dog is most prominent, which is the intended win.
+But entity ordering is downstream of observation ordering, and the same re-rank
+demoted the entity actually *labelled* `dog` below an unlabelled subject, because
+CLIP scores the picture and one picture contains several subjects.
+
+That is a trade, not an improvement. A better photograph is not always a better
+answer, and nothing in the scorecard can adjudicate it, because the eval corpus
+has no pictures. Shipping it on by default would mean changing the order of every
+existing answer on the strength of a signal this suite cannot score.
+
+### Cost
+
+350MB of weights, and **no new pip dependency** — `sentence-transformers` was
+already the Phase 6 optional dep and carries the CLIP towers, so the plan's
+estimate of a third package was pessimistic. Indexing the live memory: 475 rows
+from 84 distinct frames in **6.1s**, and re-running it writes nothing.
+
+De-duplication is per *file*, not per row: 999 observations cite 157 refs of
+which 84 survive retention, and each surviving picture is decoded once and its
+vector written to every row citing it. Frames are embedded **before** the
+retention prune in the same pass, because a picture deleted first can never be
+indexed at all.
+
+Query cost is bounded by `top_k` (50) candidates, and gated three deep — a
+config read, then one `COUNT`, then a latched model load — so a memory with no
+visual index never pays a model load to discover that.
+
+### What Phase 8 deliberately does not do
+
+**It does not pick keyframes.** `_diverse_keyframes` still selects for time
+coverage, which is a documented Phase 6 property with its own justification.
+Letting CLIP choose the strip would trade a stated guarantee for an unmeasured
+one.
+
+**It does not touch `predicate_contains`,** for the same reason Phase 6 did not:
+that field is an exact-substring machine contract, and asking a vision model
+which pictures feel like `rule_fired:` is not a question with an answer.
+
+**It does not re-rank on anything but `text`.** No visual filter, no
+"appearance" plan field. A filter implies the ability to exclude, and excluding
+on a CLIP score is the same unshippable claim as including on one.
 
 ## Baseline detail
 

@@ -19,7 +19,7 @@ import time
 from collections import Counter, defaultdict
 from typing import Optional
 
-from . import semantic
+from . import semantic, visual
 from .config import CONFIG
 from .distill import WEEKDAY_ABBR, bucket_day, bucket_hour, bucket_weekday
 from .store import SCENE_PREFIX, Store
@@ -561,14 +561,28 @@ def _retrieve(store: Store, text_q: str, pred_q: str, *, plan: dict, loc_ids,
             store, text_q, since=plan["start"], until=plan["end"],
             location_ids=loc_ids, camera_ids=cam_ids, entity_ids=entity_ids)]
     scores, reasons = _fuse(("lexical", lex_ids), ("semantic", meaning))
+    # Phase 8, and it happens AFTER the fusion rather than inside it, which is
+    # the whole design. `_fuse` takes ranked lists and unions them, so anything
+    # passed to it can introduce rows; CLIP must not, because it cannot tell a
+    # memory that lacks a red van from one that has a red van it cannot see
+    # (see `config.VisualConfig`). Re-ranking a finished list can only permute.
+    fused_n = len(scores)
+    scores = visual.rerank(store, text_q, scores)
     return scores, reasons, {
         "lexical": len(lex_ids) if lexical else None,
         "semantic": len(meaning),
-        "fused": len(scores),
+        "fused": fused_n,
         # Read off the index rather than off the result, so an empty answer can
         # still say whether meaning was consulted at all.
         "semantic_index": store.embedded_count(store.EMBED_OBSERVATION,
                                                semantic.model_name()),
+        # Same reasoning for the visual index, plus one more: `reranked` being 0
+        # while `visual_index` is large means the rows this question found have
+        # no pictures, which is a different problem from the index being unbuilt
+        # and is fixed by nothing the asker can type.
+        "visual_index": store.embedded_count(store.EMBED_KEYFRAME,
+                                             visual.model_name()),
+        "reranked": len(visual.reranked_ids(store, text_q, scores)),
         "searched_with": text_q or pred_q,
     }
 

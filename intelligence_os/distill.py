@@ -322,6 +322,12 @@ class Distiller:
         habits = self.mine_habits(since=since)
         relations = self.mine_relations(since=since)
         embedded = self.embed_new_text()
+        # Before the prune, not after, and that is load-bearing: retention
+        # deletes the picture but keeps the row, so a frame not embedded by now
+        # can never be embedded at all. The vector outliving its JPEG is fine —
+        # it describes an observation that is still in memory — but the reverse
+        # is a permanent hole.
+        reranked = self.embed_new_frames()
         pruned = prune_old_keyframes()
         return {
             "changes": len(changes),
@@ -329,6 +335,7 @@ class Distiller:
             "habits": len(habits),
             "relations": len(relations),
             "embedded": embedded,
+            "frames_embedded": reranked,
             "keyframes_pruned": pruned,
         }
 
@@ -348,6 +355,27 @@ class Distiller:
         was never wrong — only narrower.
         """
         from .semantic import backfill      # deferred: optional dep behind it
+        try:
+            return backfill(self.store)
+        except Exception:
+            return 0
+
+    def embed_new_frames(self) -> int:
+        """Index keyframes written since the last pass (search plan Phase 8).
+
+        Off unless a deployment asked for it, and a no-op costing one config
+        read when it did not. The same batching argument as `embed_new_text`
+        applies with more force: a CLIP forward pass over a JPEG is tens of
+        milliseconds, and the write path this would otherwise sit on runs per
+        frame, per camera, all day.
+
+        These vectors only ever change the ORDER of an answer, so a pass that
+        fails or never runs costs nothing but ranking — never reach, and never
+        correctness.
+        """
+        if not CONFIG.visual.enabled:
+            return 0
+        from .visual import backfill        # deferred: optional dep behind it
         try:
             return backfill(self.store)
         except Exception:

@@ -89,6 +89,32 @@ Meaning-based search needs a local model (~120MB, downloaded once, run entirely
 on your machine — no keys, no network). Without it, search is term-matching
 alone: narrower, never wrong.
 
+## Why it will not search your footage by appearance
+
+The obvious next feature is asking for *"the red van"* and having the system look
+at the pictures. It does not, and the reason is worth stating because the
+capability half-exists.
+
+An image model can be asked which stored frame is closest to a phrase, and it
+answers — always. What it cannot do is decline. Measured on this system's own
+retained frames, a dim indoor room containing a dog and a sofa, the phrase *"a
+hospital bed"* scored higher than nine of the twelve things genuinely in shot.
+No threshold separates the two: at the point where three-quarters of real matches
+have been discarded, false ones are still getting through.
+
+A search that always returns its closest frame would answer *"was there a red
+van?"* with a photograph of somebody in a white shirt. That is worse than
+answering nothing, because a keyframe reads as proof, and it would undo the one
+thing the section above is for — if every question returns something, *"I could
+not find it"* and *"it did not happen"* become the same reply again.
+
+So the image model is used only where it cannot make that mistake: **ordering
+results the word and meaning indexes already found.** Ask about the dog and the
+frame where the dog is actually the subject sorts to the front. It cannot add a
+result, cannot remove one, and cannot make an empty answer non-empty. It is off
+unless switched on (`visual_reranking: true`), costs ~350MB of weights, and
+buys the order of an answer rather than its reach.
+
 ## When nothing matches, it says where else it looked
 
 "I could not find it" and "it did not happen" used to be the same reply, which
@@ -221,6 +247,10 @@ to a stranger's.
   installed, `"loitering"` reaches a stored `"standing around, waiting"`. Without
   it, matching is term-based only and different vocabulary is not reached.
   Build the index with `python -m intelligence_os.semantic`.
+- **Appearance is not searchable, only re-orderable.** If nobody described the
+  van as red, no question finds it by being red — see above for the measurement
+  that settled that. Visual re-ranking changes which of the results you already
+  had comes first; it never changes which results you get.
 - **Meaning cannot read negation.** Asked about an open gate, a meaning match
   scores `"gate — closed"` about as highly as `"gate — open"`; the words *open*
   and *closed* are what tell them apart, and that is the term index's job. Both

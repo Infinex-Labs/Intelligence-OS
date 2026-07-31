@@ -26,6 +26,7 @@ import unittest
 from pathlib import Path
 
 from intelligence_os.tests import _stubs  # noqa: F401  (headless dep stubs)
+from intelligence_os import visual
 from intelligence_os.config import CONFIG
 from intelligence_os.store import Store
 from intelligence_os.ask import execute
@@ -345,6 +346,14 @@ def run_all(scale: int = 0) -> dict:
             # above: two runs with different switches must not read as a
             # regression in each other's direction.
             "relaxation": bool(CONFIG.reflect.enabled),
+            # Phase 8. Measured rather than read off the flag, like `semantic`
+            # and unlike `relaxation`: the ladder has no dependency, so its flag
+            # IS the answer, but a visual index needs both a switch and 350MB of
+            # weights and only one of those is knowable from config. The eval
+            # corpus is prose with no pictures behind it, so this is 0 on every
+            # machine — which is the honest reading, not a missing measurement.
+            "visual": corpus["_store"].embedded_count(
+                corpus["_store"].EMBED_KEYFRAME, visual.model_name()),
         }
     finally:
         corpus["_store"].close()
