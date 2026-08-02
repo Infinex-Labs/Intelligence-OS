@@ -57,24 +57,53 @@ def _ort_device():
 
 class FaceEmbedder:
     """Wraps insightface. Lazy-loads the model so importing this module is cheap
-    and tests that don't need real faces stay fast."""
+    and tests that don't need real faces stay fast.
+
+    `insightface` is an OPTIONAL extra (`pip install -e ".[identity]"`), and the
+    dashboard can turn face matching on without it being installed. So a missing
+    package degrades — `available` goes False and `detect()` returns nothing —
+    exactly as an absent API key degrades the describer. It must never take the
+    camera thread down with it.
+    """
 
     def __init__(self, det_size: int = 640):
         self._app = None
         self._det_size = det_size
+        self._unavailable: Optional[str] = None   # reason, once known
+
+    @property
+    def available(self) -> bool:
+        """Whether face identity can actually run. Attempts the load once."""
+        if self._unavailable is not None:
+            return False
+        return self._ensure() is not None
 
     def _ensure(self):
+        if self._unavailable is not None:
+            return None
         if self._app is None:
-            from insightface.app import FaceAnalysis  # heavy import, deferred
-            providers, ctx_id = _ort_device()
-            print(f"[identity] InsightFace providers={providers} ctx_id={ctx_id}")
-            app = FaceAnalysis(name="buffalo_l", providers=providers)
-            app.prepare(ctx_id=ctx_id, det_size=(self._det_size, self._det_size))
-            self._app = app
+            try:
+                from insightface.app import FaceAnalysis  # heavy import, deferred
+                providers, ctx_id = _ort_device()
+                print(f"[identity] InsightFace providers={providers} ctx_id={ctx_id}")
+                app = FaceAnalysis(name="buffalo_l", providers=providers)
+                app.prepare(ctx_id=ctx_id, det_size=(self._det_size, self._det_size))
+                self._app = app
+            except ImportError as e:
+                # Said once, and loudly: face matching is on in config but cannot
+                # run. Silence here would look like "nobody has a face".
+                self._unavailable = str(e)
+                print("[identity] face matching is ENABLED but insightface is not "
+                      f"installed ({e}). Falling back to track/appearance identity "
+                      "— people become 'Person NN' rather than named across days. "
+                      'Install with: pip install -e ".[identity]"')
+                return None
         return self._app
 
     def detect(self, frame_bgr: np.ndarray) -> list[FaceDetection]:
         app = self._ensure()
+        if app is None:
+            return []
         out = []
         for f in app.get(frame_bgr):
             if f.det_score < CONFIG.identity.min_face_det_score:

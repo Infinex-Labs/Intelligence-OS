@@ -24,11 +24,8 @@ from collections import defaultdict
 from typing import Optional
 
 from .ask import _kf
+from .distill import bucket_hour
 from .store import Store
-
-
-def _hour(ts: float) -> int:
-    return time.gmtime(ts).tm_hour   # matches distill.mine_habits bucketing
 
 
 def build(store: Store, since: float, now: Optional[float] = None) -> dict:
@@ -80,6 +77,11 @@ def build(store: Store, since: float, now: Optional[float] = None) -> dict:
     # baseline -> not flagged (the empty-week rule: value before baseline, §13).
     habit_hours: dict[tuple, set] = defaultdict(set)   # (eid, lid) -> {hours}
     for r in store.relations(kind="habit"):
+        # `present_around_14h` only. Phase 5 also mines `present_tue_around_14h`,
+        # which does not carry this prefix and so is skipped rather than
+        # mis-parsed — deliberate: a weekday habit says nothing about whether
+        # *this* hour is unusual, and folding it in would make every Tuesday
+        # regular look like a baseline for Wednesday.
         if r["predicate"].startswith("present_around_") and r["location_id"]:
             habit_hours[(r["subject_entity_id"], r["location_id"])].add(
                 int(r["predicate"][len("present_around_"):-1]))
@@ -89,7 +91,7 @@ def build(store: Store, since: float, now: Optional[float] = None) -> dict:
             continue
         key = (o["subject_entity_id"], o["location_id"])
         hours = habit_hours.get(key)
-        h = _hour(o["timestamp"])
+        h = bucket_hour(o["timestamp"])
         if not hours or (key, h) in flagged:
             continue
         if any(abs(h - hh) <= 1 or abs(h - hh) >= 23 for hh in hours):  # ±1h, wraps
@@ -99,7 +101,7 @@ def build(store: Store, since: float, now: Optional[float] = None) -> dict:
         if sig in triaged:
             continue
         unusual.append(_item(store, sig, o["subject_entity_id"],
-                             title=f"Present at unusual hour ({h:02d}h UTC; "
+                             title=f"Present at unusual hour ({h:02d}h local; "
                                    f"habit hours: {sorted(hours)})",
                              timestamp=o["timestamp"],
                              location=locs.get(o["location_id"]),

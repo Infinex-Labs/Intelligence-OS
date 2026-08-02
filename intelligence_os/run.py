@@ -28,7 +28,7 @@ from .observe import Observer, ResolvedDetection
 from .rules import RuleEngine
 from .scene_state import SceneState
 from .store import Store
-from .vlm import Describer, TriggerContext, TriggerDecider
+from .vlm import Describer, TriggerContext, TriggerDecider, record_description
 
 
 def _scene_signature(resolved: list[ResolvedDetection]) -> str:
@@ -202,7 +202,12 @@ def _camera_loop(cam_name: str, source, shared: _SharedModels,
             resolved: list[ResolvedDetection] = []
             new_entity = False
             for d in dets:
-                if d.cls_name == "person" and CONFIG.identity.enabled:
+                # `available` is checked, not just the config flag: face matching
+                # can be switched on in the dashboard without the optional
+                # insightface extra installed. Without this the branch below
+                # `continue`s on every person and the camera records nobody.
+                if (d.cls_name == "person" and CONFIG.identity.enabled
+                        and shared.face_embedder.available):
                     x1, y1, x2, y2 = d.bbox
                     crop = frame.image[max(0, y1):y2, max(0, x1):x2]
                     faces = shared.face_embedder.detect(crop) if crop.size else []
@@ -294,15 +299,13 @@ def _camera_loop(cam_name: str, source, shared: _SharedModels,
                 })
                 vlm_calls += 1
                 if desc:
-                    for subj_ref, predicate in desc.states():
-                        subj = (resolved[0].entity_id if subj_ref in ("person", "scene")
-                                and resolved else subj_ref)
-                        if not subj.startswith("ent_"):
-                            continue
-                        store.add_observation(subj, predicate, confidence=0.6,
-                                              source_ref=keyframe_path, origin="vlm",
-                                              timestamp=frame.timestamp,
-                                              camera_id=cam_name)
+                    # Search plan Phase 1: the whole report is persisted, not the
+                    # three-of-four sections the old write path kept.
+                    record_description(
+                        store, desc, timestamp=frame.timestamp, camera_id=cam_name,
+                        source_ref=keyframe_path,
+                        owner_entity_id=resolved[0].entity_id if resolved else None,
+                        zone_ids={z.name: z.location_id for z in scene.zones})
             last_signature = sig
 
             if _present(resolved, vlm_flash):
@@ -369,8 +372,28 @@ def run(args, on_frame=None, state=None) -> None:
         state["cameras"][cam_name] = cam_state
         # M6: on_frame is per-camera (web.py passes cam_name to pick the right buffer)
         cam_on_frame = (lambda img, _n=cam_name: on_frame(img, cam_name=_n)) if on_frame else None
+
+        def guarded(*a, **kw):
+            """A camera thread that dies must SAY so.
+
+            Without this, an exception is printed to stderr and the thread is
+            gone: the dashboard keeps serving the last frame it buffered, so a
+            dead camera is indistinguishable from a still one. The reason lands
+            on cam_state, which /api/cameras reports.
+            """
+            try:
+                _camera_loop(*a, **kw)
+            except Exception as e:                      # noqa: BLE001
+                import traceback
+                cam_state["error"] = f"{type(e).__name__}: {e}"
+                cam_state["stopped_at"] = time.time()
+                print(f"[run:{cam_name}] CAMERA STOPPED — {cam_state['error']}")
+                traceback.print_exc()
+            else:
+                cam_state["stopped_at"] = time.time()
+
         t = threading.Thread(
-            target=_camera_loop,
+            target=guarded,
             args=(cam_name, source, shared, cam_state, args),
             kwargs={"on_frame": cam_on_frame, "show": show and solo},
             daemon=True,
@@ -409,7 +432,7 @@ def run(args, on_frame=None, state=None) -> None:
 
     n_people = len(store.list_entities("person"))
     n_objs = len(store.list_entities("object"))
-    n_obs = len(store.observations())
+    n_obs = store.count_observations()
     total_frames = sum(state["cameras"][c["name"]].get("frames_seen", 0) for c in cameras)
     total_vlm = sum(state["cameras"][c["name"]].get("vlm_calls", 0) for c in cameras)
     print(f"\n[run] frames={total_frames}  entities: {n_people} people / {n_objs} objects  "

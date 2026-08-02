@@ -31,7 +31,7 @@ def _fmt_time(t: float) -> str:
 
 def cmd_list(store: Store, args) -> None:
     for e in store.list_entities(type_=args.type, active_only=not args.all):
-        nobs = len(store.observations(e["entity_id"]))
+        nobs = store.count_observations(e["entity_id"])
         nrel = len(store.relations(e["entity_id"]))
         print(f"{e['entity_id']}  {e['type']:6s}  {e['label'] or '(unnamed)':16s}  "
               f"status={e['status']:14s}  obs={nobs}  rel={nrel}")

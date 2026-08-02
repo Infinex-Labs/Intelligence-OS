@@ -8,7 +8,8 @@ import os
 import tempfile
 
 from intelligence_os.store import Store
-from intelligence_os.ask import execute, _facts, _history_messages
+from intelligence_os.ask import (execute, normalize_plan, _answer, _facts,
+                                 _history_messages)
 
 
 def main():
@@ -43,10 +44,30 @@ def main():
     assert "/keyframe/kf_a.jpg" in e["keyframes"], e
     print("  zone+window scoping, rule events, states, keyframes OK")
 
-    # window excludes everything -> empty, no invention
-    r = execute(store, {"start": 10_000, "end": None, "zone": None})
+    # window excludes everything -> empty, no invention.
+    #
+    # Asserted against a single pass. Phase 7's ladder sits on top of execute()
+    # and will widen a window that matched nothing — which does not invent
+    # anything (the rows it comes back with are real rows) but does answer a
+    # slightly different question, and the §8.2 guarantee under test here is
+    # about the pass, not about the policy above it. The ladder's own contract,
+    # that it always says what it loosened, is asserted immediately below.
+    plan = normalize_plan({"start": 10_000, "end": None, "zone": None})
+    r = _answer(store, {}, plan)
     assert r["entities"] == [] and r["total_observations"] == 0, r
     print("  empty window -> empty answer OK")
+
+    # ... and when the ladder does widen it, the answer says so rather than
+    # passing itself off as the answer to what was asked.
+    r = execute(store, {"start": 10_000, "end": None, "zone": None})
+    if r["entities"]:
+        assert r["relaxation"]["answered_by"], r
+        assert r["relaxation"]["loosened"], r
+        assert "relaxed_query" in _facts(r), _facts(r)
+        print("  widened answer discloses what it loosened OK")
+    else:
+        assert r["relaxation"]["attempted"], r
+        print("  widening found nothing, and reported that it tried OK")
 
     # predicate filter finds the smoking observation only
     r = execute(store, {"start": None, "end": None, "zone": None,

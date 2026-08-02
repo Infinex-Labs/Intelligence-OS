@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -195,8 +196,8 @@ def save_rule(spec: dict) -> None:
 
 def set_rule_enabled(name: str, enabled: bool) -> bool:
     """Toggle a rule without deleting it (M5). It stays in rules.yaml; the engine
-    just skips disabled rules. Takes effect on the next pipeline start, like edits.
-    Raises KeyError if no such rule."""
+    just skips disabled rules. A running engine notices within
+    `RuleEngine.reload_poll_s`. Raises KeyError if no such rule."""
     import yaml
     rules = load_rules()
     if not any(r.get("name") == name for r in rules):
@@ -266,43 +267,109 @@ class RuleEngine:
     gap_reset_s = 5.0     # subject unseen this long -> restart its dwell clock
     verify_retry_s = 30.0  # after a non-'yes' verify, wait this long before re-asking
     # ponytail: fixed retry interval; make per-rule if a rule ever needs faster re-checks
+    reload_poll_s = 2.0   # how often rules.yaml is checked for edits (see _maybe_reload)
 
     def __init__(self, store, rules: Optional[list[dict]] = None,
                  verifier: Optional[Callable[..., str]] = None,
                  frames_dir=FRAMES_DIR):
         self.store = store
-        # disabled rules stay in rules.yaml but never fire (M5 enable/disable)
-        self.rules = [r for r in (rules if rules is not None else load_rules())
-                      if r.get("enabled", True)]
         self.verifier = verifier
         self.frames_dir = frames_dir
-        # zone name -> location_id (rules reference zones by name; detections carry ids)
-        self.zone_ids = {r["name"]: r["location_id"] for r in store.locations()}
         self._dwell: dict[tuple, float] = {}      # (rule, entity) -> first_seen_ts
         self._last_seen: dict[tuple, float] = {}
         self._cooldown: dict[tuple, float] = {}   # (rule, entity) -> last_fired_ts
         self._last_verify: dict[tuple, float] = {}  # (rule, entity) -> last non-yes ask
+        self._neg: dict[str, list] = {}
+        # Rules injected by a caller (tests, examples) are that caller's business:
+        # only a disk-backed engine watches the file for edits.
+        self._from_disk = rules is None
+        self._mtime: Optional[float] = None
+        self._last_poll = 0.0
+        self._arm(rules if rules is not None else load_rules())
+
+    def _arm(self, rules: list[dict]) -> None:
+        """(Re)build everything derived from the rule list. Per-subject state —
+        dwell clocks, cooldowns — is deliberately NOT reset here; see reload()."""
+        # disabled rules stay in rules.yaml but never fire (M5 enable/disable)
+        self.rules = [r for r in rules if r.get("enabled", True)]
+        # zone name -> location_id (rules reference zones by name; detections carry ids)
+        self.zone_ids = {r["name"]: r["location_id"] for r in self.store.locations()}
         # §9.2 principle applied at arm-time: a rule whose zone doesn't exist can
         # never fire. Surface it loudly rather than watching nothing in silence.
         self.zone_warnings = [(r["name"], r["trigger"]["zone"]) for r in self.rules
                               if r.get("trigger", {}).get("zone")
                               and r["trigger"]["zone"] not in self.zone_ids]
         # §9.3 correction moat: crops an operator dismissed become negative examples
-        # fed into the verifier so the rule sharpens with use. Loaded at arm time —
-        # a corrected rule gets sharper on the next pipeline start (same lifecycle as
-        # rule edits). ponytail: refresh mid-run only if corrections need to land live.
-        self._neg: dict[str, list] = {}
+        # fed into the verifier so the rule sharpens with use.
         for r in self.rules:
-            if not r.get("verify"):
+            if not r.get("verify") or r["name"] in self._neg:
                 continue
-            imgs = [im for im in (cv2.imread(p) for p in dismissed_crops(store, r["name"]))
+            imgs = [im for im in (cv2.imread(p) for p in dismissed_crops(self.store, r["name"]))
                     if im is not None]
             if imgs:
                 self._neg[r["name"]] = imgs
                 print(f"[rule] {r['name']}: {len(imgs)} correction example(s) loaded")
+        if self._from_disk:
+            try:
+                self._mtime = RULES_PATH.stat().st_mtime
+            except OSError:
+                self._mtime = None
+
+    def reload(self) -> bool:
+        """Re-read rules.yaml and re-arm without restarting the pipeline.
+
+        Rules are a file on disk, so needing a restart to pick up an edit was
+        incidental, not necessary — and it made the dashboard's rule editor feel
+        broken. What is NOT reset is per-subject state: dwell clocks and
+        cooldowns survive for rules that still exist, so saving an edit cannot be
+        used to clear a rule's rate limit. State for rules that went away is
+        dropped.
+
+        Returns True if the rule set changed.
+        """
+        before = [r.get("name") for r in self.rules]
+        self._arm(load_rules())
+        live = {r.get("name") for r in self.rules}
+        for state in (self._dwell, self._last_seen, self._cooldown, self._last_verify):
+            for key in [k for k in state if k[0] not in live]:
+                del state[key]
+        for name in list(self._neg):
+            if name not in live:
+                del self._neg[name]
+        changed = before != [r.get("name") for r in self.rules]
+        added, removed = live - set(before), set(before) - live
+        if added or removed:
+            bits = [f"+{n}" for n in sorted(added)] + [f"-{n}" for n in sorted(removed)]
+            print(f"[rule] reloaded: {', '.join(bits)} ({len(self.rules)} armed)")
+        for name, zone in self.zone_warnings:
+            print(f"[rule] WARNING rule '{name}' targets zone '{zone}' which is not "
+                  f"defined — it can NEVER fire.")
+        return changed
+
+    def _maybe_reload(self, now: Optional[float] = None) -> None:
+        """Pick up rules.yaml edits within `reload_poll_s`.
+
+        Polling the mtime rather than having the web layer push: it also catches a
+        hand-edited file, and it needs no reference from the HTTP thread into the
+        camera thread's engine. Monotonic clock, not the frame timestamp — a video
+        file's timestamps are not wall time.
+        """
+        if not self._from_disk:
+            return
+        now = time.monotonic() if now is None else now
+        if now - self._last_poll < self.reload_poll_s:
+            return
+        self._last_poll = now
+        try:
+            mtime = RULES_PATH.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime != self._mtime:
+            self.reload()
 
     def feed(self, resolved, frame_bgr, ts: float) -> list[FiredEvent]:
         """resolved: list with .entity_id, .det (Detection), .location_id."""
+        self._maybe_reload()
         fired: list[FiredEvent] = []
         for rd in resolved:
             for rule in self.rules:
