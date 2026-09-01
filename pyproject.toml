@@ -52,10 +52,10 @@ vlm = ["anthropic>=0.40"]                               # stage F — descriptio
 # torch, not caution: transformers 5.x needs torch>=2.4 and ultralytics brings
 # 2.2, so an unpinned resolve imports fine and then fails at the first model
 # load. Raise both together, after checking `torch.__version__`.
-semantic = ["sentence-transformers>=3,<4", "transformers>=4.41,<5"]
+semantic = ["sentence-transformers>=3,<7", "transformers>=4.41,<6"]
 dev = ["ruff>=0.6"]
 all = ["insightface>=0.7", "onnxruntime>=1.17", "anthropic>=0.40",
-       "sentence-transformers>=3,<4", "transformers>=4.41,<5"]
+       "sentence-transformers>=3,<7", "transformers>=4.41,<6"]
 
 [project.urls]
 Homepage = "https://github.com/Infinex-Labs/Intelligence-OS"
